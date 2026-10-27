@@ -10,6 +10,12 @@ up to date at the end of every milestone.
       volatile 1000 block behind `allow_commands` (off), the heating off
       always available and kept in /data, keepalive, buttons, docs en/fr,
       cover. Tested against a fake controller and a loopback server only.
+- [x] **Review r3** (2026-10-27): APPROUVÉ, no blocker.
+- [ ] **Next patch — review r3 leftovers**: TODO "unless older than 24 h"
+      line is stale (the stop has no time limit); a mode refused because
+      /data was slow says the controller was too slow; a stop moved to another
+      CTC shows "waiting for identification" instead of "other controller"; a
+      configuration read without an address lifts the stop.
 - [ ] **Milestone 2 — real CTC**: run against a real unit (see "To check").
 - [ ] **Milestone 3 — more**: hot water setpoint (1033) once its scale is
       known, circuits 2 to 4, cooling, immersion heater and compressor
