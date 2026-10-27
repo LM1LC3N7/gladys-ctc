@@ -143,7 +143,7 @@ export const TIMINGS = {
    */
   stopRetryMax: 5 * MINUTE,
   stopRefusedRetryMax: 30 * MINUTE,
-  /** What Gladys holds (the heating off included) ends after 24 hours. */
+  /** A setpoint or mode Gladys holds ends after 24 hours (never the heating off). */
   holdMax: 24 * HOUR,
   /** A configuration that could not be read: read again after 5 s, doubled up to 5 min. */
   configRetry: 5 * SECOND,
