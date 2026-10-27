@@ -199,6 +199,11 @@ export const HOLD_TEXTS = {
       `${name.en} given back: the setting was changed at the panel.`,
       `${name.fr} rendu : le réglage a été changé sur l'écran du régulateur.`,
     ),
+  endedByRemoval: (name) =>
+    both(
+      `${name.en} given back: the address or the device was removed.`,
+      `${name.fr} rendu : l'adresse ou l'appareil a été supprimé.`,
+    ),
   endedByTime: (name) =>
     both(`${name.en} given back after 24 hours.`, `${name.fr} rendu au bout de 24 heures.`),
   roomSetpoint: (value) =>
@@ -238,7 +243,11 @@ export const T = {
         `Registers this model does not answer, left out: ${blocks}.`,
         `Registres auxquels ce modèle ne répond pas, ignorés : ${blocks}.`,
       ),
-    stop_inForce: both('Heating off held by Gladys.', 'Arrêt du chauffage tenu par Gladys.'),
+    stop_inForce: (date) =>
+      both(
+        `Heating off held by Gladys since ${date}.`,
+        `Arrêt du chauffage tenu par Gladys depuis le ${date}.`,
+      ),
     stop_pending: both(
       'Heating off asked, not yet acknowledged: tried again, spaced.',
       'Arrêt du chauffage demandé, pas encore acquitté : réessayé, à intervalles croissants.',

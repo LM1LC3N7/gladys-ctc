@@ -85,6 +85,9 @@ function numberOf(value) {
 }
 
 /** A stored value compared as read: the code of an enum, the number otherwise. */
+/** 61542 "Heating mode" Off (manual: 0 Auto, 1 On, 2 Off). */
+const HEATING_MODE_OFF = 2;
+
 const panelValue = (value) => (value && typeof value === 'object' ? value.code : value);
 
 /** A wall date, shown: "2026-10-27 18:04 UTC". */
@@ -186,18 +189,23 @@ export class CtcApp {
     const wall = this.now();
     // A date in the future is not trusted: the stop counts from now.
     const since = Number.isFinite(kept.since) && kept.since <= wall ? kept.since : wall;
-    if (wall - since >= this.timings.holdMax) {
-      this.logger.info('Heating off kept in /data is older than 24 hours: given back');
-      this.lastEnd = { text: HOLD_TEXTS.endedByTime(OPTION_NAMES.off), at: wall };
-      this.persist(null).catch(() => {});
-      return;
-    }
+    // No end by the time: giving a heating off back restarts the heating.
     this.heatingStop = this.newStop(address, since);
     this.useClient(address);
-    this.logger.info(
-      `Heating off kept in /data (since ${dateText(since)}): written again to ${addressKey(address)}`,
-    );
-    this.writeStop().catch(() => {});
+    if (kept.waitIdentify === true) {
+      // Moved to an address never identified as a CTC: still waiting for it.
+      this.heatingStop.waitIdentify = true;
+      this.heatingStop.expectIdentity =
+        typeof kept.expectIdentity === 'string' ? kept.expectIdentity.slice(0, 40) : undefined;
+      this.logger.info(
+        `Heating off kept in /data (since ${dateText(since)}): waiting for a CTC at ${addressKey(address)}`,
+      );
+    } else {
+      this.logger.info(
+        `Heating off kept in /data (since ${dateText(since)}): written again to ${addressKey(address)}`,
+      );
+      this.writeStop().catch(() => {});
+    }
     this.startKeepalive();
   }
 
@@ -213,7 +221,9 @@ export class CtcApp {
       refused: undefined,
       reason: undefined,
       panel: undefined,
+      panelOther: 0,
       waitIdentify: false,
+      expectIdentity: undefined,
       writing: undefined,
     };
   }
@@ -288,7 +298,15 @@ export class CtcApp {
     this.configRead = true;
     this.configError = undefined;
     const address = this.config.address;
+    if (!address && !this.config.invalid && this.heatingStop) {
+      // The address was removed from the configuration: the stop goes.
+      this.logger.info('CTC: address removed from the configuration, heating off given back');
+      this.lastEnd = { text: HOLD_TEXTS.endedByRemoval(OPTION_NAMES.off), at: this.now() };
+      this.heatingStop = undefined;
+      this.persist(null).catch(() => {});
+    }
     if (address && !sameAddress(this.client?.address, address)) {
+      const previousIdentity = this.identity;
       this.forgetController();
       if (this.heatingStop && !sameAddress(this.heatingStop.address, address)) {
         // The stop follows the address of the configuration (the same heat
@@ -300,7 +318,10 @@ export class CtcApp {
         this.heatingStop.address = address;
         this.heatingStop.ackedAt = undefined;
         this.heatingStop.panel = undefined;
+        this.heatingStop.panelOther = 0;
         this.heatingStop.waitIdentify = true;
+        // The CTC known before, when there was one, must answer there.
+        this.heatingStop.expectIdentity = previousIdentity ?? this.heatingStop.expectIdentity;
         this.persist().catch(() => {});
       }
       this.releaseSensitive('address changed');
@@ -565,8 +586,18 @@ export class CtcApp {
     }
     const stop = this.heatingStop;
     if (stop?.waitIdentify && sameAddress(stop.address, this.config.address)) {
-      stop.waitIdentify = false;
-      this.writeStop().catch(() => {});
+      if (stop.expectIdentity && stop.expectIdentity !== identity) {
+        if (stop.reason !== 'other identity') {
+          stop.reason = 'other identity';
+          this.logger.warn('CTC heating off: another controller at the new address, not written');
+        }
+      } else {
+        stop.waitIdentify = false;
+        stop.expectIdentity = undefined;
+        stop.reason = undefined;
+        this.persist().catch(() => {});
+        this.writeStop().catch(() => {});
+      }
     }
     this.watchPanel(startedAt);
   }
@@ -601,15 +632,24 @@ export class CtcApp {
    * not read never gives anything back.
    */
   watchPanel(startedAt) {
-    const entries = [...this.holds].map(([role, entry]) => [role, entry]);
+    const entries = [...this.holds];
     if (this.heatingStop) {
       entries.push([F.HEATING_MODE, this.heatingStop]);
     }
     for (const [role, entry] of entries) {
-      if (entry.ackedAt === undefined || entry.ackedAt >= startedAt) {
+      // Noted from a round started after the first acknowledgement; the
+      // rewrites every minute do not hold the comparison back.
+      if (
+        entry.ackedAt === undefined ||
+        (entry.panel === undefined && entry.ackedAt >= startedAt)
+      ) {
         continue;
       }
       const value = panelValue(this.values?.[PANEL[role]]);
+      if (entry === this.heatingStop) {
+        this.watchStopPanel(entry, value);
+        continue;
+      }
       if (value === undefined) {
         continue;
       }
@@ -618,8 +658,34 @@ export class CtcApp {
         continue;
       }
       if (value !== entry.panel) {
+        // A held value given back on one reading: the safe way.
         this.endHold(role, entry, 'panel');
       }
+    }
+  }
+
+  /**
+   * The heating stop is given back by the panel only when 61542 reads, two
+   * rounds in a row, a value other than the one noted and other than Off
+   * (2): one odd reading, an unread value or Off itself give nothing back.
+   */
+  watchStopPanel(stop, value) {
+    if (value === undefined) {
+      stop.panelOther = 0;
+      return;
+    }
+    if (stop.panel === undefined) {
+      stop.panel = value;
+      return;
+    }
+    if (value === stop.panel || value === HEATING_MODE_OFF) {
+      stop.panelOther = 0;
+      return;
+    }
+    stop.panelOther += 1;
+    if (stop.panelOther >= 2) {
+      this.logger.info(`CTC heating off: 61542 noted ${stop.panel}, read ${value} twice in a row`);
+      this.endHold(F.HEATING_MODE, stop, 'panel');
     }
   }
 
@@ -740,6 +806,12 @@ export class CtcApp {
     }
     if (stop) {
       data.stop = { host: stop.address.host, port: stop.address.port, since: stop.since };
+      if (stop.waitIdentify) {
+        data.stop.waitIdentify = true;
+        if (stop.expectIdentity) {
+          data.stop.expectIdentity = stop.expectIdentity;
+        }
+      }
     }
     return this.store.save(data).then(
       () => {
@@ -766,9 +838,8 @@ export class CtcApp {
   async keepalive() {
     const mono = this.monotonic();
     const stop = this.heatingStop;
-    if (stop && mono - stop.sinceMono >= this.timings.holdMax) {
-      this.endHold(F.HEATING_MODE, stop, 'time');
-    } else if (stop && !stop.writing && !stop.waitIdentify) {
+    // No end by the time for the stop: giving it back restarts the heating.
+    if (stop && !stop.writing && !stop.waitIdentify) {
       const due =
         stop.ackedAt === undefined || stop.refused !== undefined
           ? mono >= stop.nextTryAt
@@ -1164,6 +1235,19 @@ export class CtcApp {
     let left = false;
     /** The heating stop a newer mode replaces once it has left. */
     let replaced;
+    if (role === F.HEATING_MODE && this.heatingStop) {
+      // /data without the stop BEFORE the bytes leave, written before the
+      // line is taken (a slow disk never holds a heating off behind it): a
+      // restart never replays a stop the user has replaced. Restored below
+      // if the mode does not leave or is refused.
+      replaced = this.heatingStop;
+      try {
+        await this.persist(null);
+      } catch {
+        await this.persist(replaced).catch(() => {});
+        throw this.refusal(ERRORS.storeFailed);
+      }
+    }
     try {
       await client.session(
         async (raw) => {
@@ -1183,18 +1267,8 @@ export class CtcApp {
             );
           }
           this.checkBeforeSend(generation, seq, role, order);
-          if (role === F.HEATING_MODE && this.heatingStop) {
-            // /data without the stop BEFORE the bytes leave: a restart
-            // never replays a stop the user has replaced. Restored below
-            // if the mode does not leave or is refused.
-            replaced = this.heatingStop;
-            try {
-              await this.persist(null);
-            } catch {
-              replaced = undefined;
-              throw this.refusal(ERRORS.storeFailed);
-            }
-            this.checkBeforeSend(generation, seq, role, order);
+          if (replaced && this.heatingStop !== replaced) {
+            throw this.refusal(ERRORS.cancelledByStop);
           }
           await raw.writeRegister(CONTROLS[role].address, wanted.word, {
             startBy: sendBy,
@@ -1377,7 +1451,9 @@ export class CtcApp {
       notes.push(
         state === 'refused'
           ? T.notes.stopRefused(this.heatingStop.refused)
-          : T.notes[`stop_${state}`],
+          : state === 'inForce'
+            ? T.notes.stop_inForce(dateText(this.heatingStop.since))
+            : T.notes[`stop_${state}`],
       );
     }
     if (this.lastEnd) {
@@ -1430,10 +1506,22 @@ export class CtcApp {
     await this.updateStatus();
   }
 
+  /** The device deleted: what Gladys holds goes with it, the heating off included. */
   async deviceDeleted(device) {
     this.badge = undefined;
-    if (typeof device?.external_id === 'string') {
-      this.publisher.forget(device.external_id);
+    if (typeof device?.external_id !== 'string') {
+      return;
+    }
+    this.publisher.forget(device.external_id);
+    if (device.external_id !== deviceIds(this.gladys).device) {
+      return;
+    }
+    this.releaseSensitive('device deleted');
+    if (this.heatingStop) {
+      this.logger.info('CTC: device deleted, heating off given back');
+      this.lastEnd = { text: HOLD_TEXTS.endedByRemoval(OPTION_NAMES.off), at: this.now() };
+      this.heatingStop = undefined;
+      await this.persist(null).catch(() => {});
     }
   }
 

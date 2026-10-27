@@ -84,22 +84,35 @@ hold that ended.
 
 ### How a hold ends
 
-What Gladys holds (the heating off included) ends:
+The **room setpoint, the hot water mode and the Heating or Auto mode** end:
 
 - **at the panel**: change the matching setting on the display (heating
-  mode of circuit 1 for the circuit mode and the heating off, room setting
-  of circuit 1, hot water mode). Gladys notes these settings after the
-  controller acknowledged its value and gives the hold back as soon as one
-  of them changes (a setting it cannot read gives nothing back);
-- **after 24 hours**, by itself;
+  mode of circuit 1, room setting of circuit 1, hot water mode). Gladys
+  notes these settings once the controller has acknowledged its value and
+  gives the hold back at the first different reading (a setting it cannot
+  read gives nothing back);
+- **after 24 hours**, by themselves;
 - with _Controller's own program_ or the button **Give control back to the
-  heat pump** (for the heating off: only with "Allow the commands");
-- when "Allow the commands" is turned off (not the heating off), when the
-  display software version changes, or when the controller refuses a value
-  (not the heating off);
-- in the last resort, by setting Ethernet back to anything but Modbus TCP
-  on the display, or stopping the integration: the controller forgets
-  within 5 minutes.
+  heat pump**;
+- when "Allow the commands" is turned off, when the display software
+  version changes, or when the controller refuses the value.
+
+The **heating off** has no end by the time: giving it back restarts the
+heating, which Gladys never does without a click. It ends only:
+
+- with _Controller's own program_, _Heating_, _Auto_ or the button **Give
+  control back to the heat pump**, when "Allow the commands" is on;
+- **at the panel**: set the heating mode of circuit 1 to Auto or On; Gladys
+  gives the heating off back when it reads that setting, different from the
+  one noted and other than Off, on two rounds in a row;
+- when the address is removed from the configuration, or the device is
+  deleted in Gladys.
+
+The status and **Control held by Gladys** say since when it is held. In the
+last resort, setting Ethernet back to anything but Modbus TCP on the
+display, or stopping the integration, makes the controller forget within 5
+minutes; the heating off kept in `/data` is written again when the
+integration starts again.
 
 Whether the panel or the 1000 block wins while Gladys holds a value is not
 known (never tested with a real CTC).
@@ -108,10 +121,12 @@ known (never tested with a real CTC).
 
 _Heating off_ (zone mode of circuit 1 = Off) is the protective command. It
 works **even when "Allow the commands" is off**, while the controller has
-not been read yet, after a failed round and when `/data` cannot be written.
-It never waits behind the queued reads: it waits only for the Modbus
-request in flight to end (its answer, or 5 s of silence: CTC answers one
-request at a time), then leaves first.
+not been read yet, after a failed round and when `/data` cannot be written
+or is slow. It never waits behind the queued reads, but CTC answers one
+request at a time: it waits for the Modbus exchange in flight to end
+(usually a fraction of a second; up to about 7 s behind a rewrite whose
+identity read and write both stay unanswered), then leaves first. Its own
+answer is awaited 5 s; the line stays open after a silence.
 
 It is refused only when no controller address is known: none in the
 configuration and none kept in `/data` (the address of the stop, or the
@@ -122,21 +137,22 @@ uses the address kept in `/data`.
 
 It is kept in `/data` with its address and its date: after a restart of
 the integration it is written again at once, before the configuration is
-even read, unless it is older than 24 hours. When the configuration gives
-a new address, it is written there only once a round has identified a CTC
-at that address.
+even read. When the configuration gives a new address, it is written there
+only once a round has identified a CTC at that address (the same display
+software version as before, when one was known); this wait is kept in
+`/data` too.
 
 When the controller does not acknowledge it within 3.5 s, Gladys answers
 that it is recorded and not yet acknowledged; when the controller refuses
 it (Modbus exception 1, 2 or 3), Gladys says so. In both cases it is kept
-and tried again: after 15 s, then twice as long each time, up to 5 minutes
-(30 minutes after a refusal). Once acknowledged, it is written again every
-minute.
+and tried again as soon as the line is free, then after 15 s, then twice as
+long each time, up to 5 minutes (30 minutes after a refusal). Once
+acknowledged, it is written again every minute.
 
 A newer mode (_Heating_, _Auto_) replaces it once its write has left;
-`/data` is written before that. If the controller refuses the newer mode,
-the heating off stays. A command asked before the heating off and not
-sent yet is cancelled.
+`/data` is written before that, before the line is taken. If the
+controller refuses the newer mode, the heating off stays. A command asked
+before the heating off and not sent yet is cancelled.
 
 Whether CTC keeps its frost protection with the zone mode Off is not known:
 check it on your installation before relying on it in winter.

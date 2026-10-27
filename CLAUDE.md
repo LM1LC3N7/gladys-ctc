@@ -60,18 +60,19 @@ test/kit/                 copied from gladys-testkit (clocks, loopback TCP serve
   dropped by transaction id); 60 ms between transactions, 3 s after a
   connection, 10 s after a close.
 - **Heating off** (1015 = 0): never refused for the option, the identity,
-  a failed round or /data; never pipelined (it waits for the request in
-  flight, then passes before the queue); kept in /data with its address,
-  written at start before getConfig (unless older than 24 h), every minute
-  once acknowledged, retried from 15 s (doubled, up to 5 min, 30 min after a
-  refusal 1/2/3); written at a new address only once a CTC is identified
-  there; given back only with the option (/data first), at the panel
-  (61542 changed) or after 24 h. A newer mode refused by the controller
-  leaves it in place.
-- **Holds end** at the panel (61542, 61509, 61500 differ from the value
-  noted after the acknowledgement; unread = nothing), after 24 h, with the
-  option off, an identity change or a refusal; shown as "program" or the
-  controller's room setting when not in force.
+  a failed round or /data; never pipelined (it waits for the exchange in
+  flight, then passes before the queue); kept in /data with its address
+  (and its wait for a CTC at a new address), written at start before
+  getConfig, every minute once acknowledged, retried from 15 s (doubled, up
+  to 5 min, 30 min after a refusal 1/2/3). **No end by the time.** Given
+  back only by a click with the option (/data first), at the panel (61542
+  other than the noted value and other than Off, two rounds in a row), or
+  when the address is removed or the device deleted. A newer mode refused
+  by the controller leaves it in place.
+- **Other holds end** at the panel (61542, 61509, 61500 differ from the
+  value noted after the acknowledgement, one reading; unread = nothing),
+  after 24 h, with the option off, an identity change or a refusal; shown
+  as "program" or the controller's room setting when not in force.
 - **Other commands**: `allow_commands`; identity (display software version)
   read again in the same session; sent within 3.5 s or not sent; cancelled
   by a heating off asked meanwhile; never replayed after a restart.

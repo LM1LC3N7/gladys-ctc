@@ -101,16 +101,29 @@ up to date at the end of every milestone.
   /data). A new address moves it, written there only once a round
   identifies a CTC (review r1 a). A round whose 62244/62245 give no
   identity is "not identified as a CTC": no device, no "Connected".
-- **Holds end** (review r1): at the panel (61542 for the circuit mode and
-  the stop, 61509 for the room setpoint, 61500 for the hot water mode,
-  noted at the first round started after the acknowledgement; a different
-  value read later gives the hold back, /data too for the stop; unread
-  values give nothing back), after 24 h (`holdMax`), with the option off
-  (not the stop), on an identity change or a refusal (not the stop).
-  Logged, shown in "Control held by Gladys" and in the status. Not in
-  force (lapsed), the selects show "program" and the room setpoint the
-  controller's own setting; "Control held by Gladys" shows dates, not ages
-  (no new state every 15 s).
+- **Holds end** (reviews r1, r2): the room setpoint, the hot water mode
+  and the Heating/Auto mode end at the panel (61509, 61500, 61542 noted at
+  the first round started after the acknowledgement; one different reading
+  gives the hold back; unread values give nothing back), after 24 h
+  (`holdMax`), with the option off, on an identity change or a refusal.
+  **The heating off has no end by the time** (r2, decided by the rules:
+  ending it restarts the heating, which needs a click with the option): it
+  ends by a click with the option, at the panel when 61542 reads, two
+  rounds in a row, a value other than the one noted and other than Off
+  (2) (the noted and read values logged), or when the address is removed
+  from the configuration or the device deleted. Status and "Control held
+  by Gladys" give its date. Not in force (lapsed), the selects show
+  "program" and the room setpoint the controller's own setting; dates,
+  not ages, in the text.
+- **Moved stop** (r2): the wait for a CTC at a new address and the
+  identity known before are kept in /data; after a restart, a moved stop
+  is never written to an address never identified; with a known identity,
+  only the same display software version counts.
+- **Write silence** (r2): a write without answer keeps the line like a
+  read silence (late answer dropped by transaction id): a heating off
+  queued behind it leaves at once, about 7 s at worst behind a rewrite.
+- **/data before a newer mode** (r2): written before the Modbus line is
+  taken, so a slow disk never holds a heating off back.
 - **getConfig** (review r1): read again until it comes, 5 s doubled up to
   5 min, with the status saying so.
 - **Ordering**: a heating off moves `stopSeq`; a command that captured an

@@ -87,22 +87,37 @@ demandé sans être en vigueur, et la dernière tenue terminée.
 
 ### Comment une tenue se termine
 
-Ce que Gladys tient (l'arrêt du chauffage compris) se termine :
+**La consigne de la pièce, le mode de l'eau chaude et le mode Chauffage ou
+Auto** se terminent :
 
 - **à l'écran du régulateur** : changez le réglage correspondant (mode de
-  chauffage du circuit 1 pour le mode du circuit et l'arrêt, réglage de la
-  pièce du circuit 1, mode de l'eau chaude). Gladys note ces réglages une
-  fois sa valeur acquittée et rend la tenue dès que l'un d'eux change (un
-  réglage qu'elle ne peut lire ne rend rien) ;
-- **au bout de 24 heures**, d'elle-même ;
+  chauffage du circuit 1, réglage de la pièce du circuit 1, mode de l'eau
+  chaude). Gladys note ces réglages une fois sa valeur acquittée et rend la
+  tenue à la première lecture différente (un réglage qu'elle ne peut lire ne
+  rend rien) ;
+- **au bout de 24 heures**, d'eux-mêmes ;
 - avec _Programme du régulateur_ ou le bouton **Rendre la main à la pompe à
-  chaleur** (pour l'arrêt : seulement avec « Autoriser les commandes ») ;
-- quand « Autoriser les commandes » est désactivé (sauf l'arrêt), quand la
-  version du logiciel de l'écran change, ou quand le régulateur refuse une
-  valeur (sauf l'arrêt) ;
-- en dernier recours, en remettant Ethernet sur autre chose que Modbus TCP à
-  l'écran, ou en arrêtant l'intégration : le régulateur oublie sous 5
-  minutes.
+  chaleur** ;
+- quand « Autoriser les commandes » est désactivé, quand la version du
+  logiciel de l'écran change, ou quand le régulateur refuse la valeur.
+
+**L'arrêt du chauffage** n'a pas de fin par le temps : le rendre relance le
+chauffage, ce que Gladys ne fait jamais sans un clic. Il ne se termine que :
+
+- avec _Programme du régulateur_, _Chauffage_, _Auto_ ou le bouton **Rendre
+  la main à la pompe à chaleur**, quand « Autoriser les commandes » est
+  activé ;
+- **à l'écran du régulateur** : réglez le mode de chauffage du circuit 1 sur
+  Auto ou Marche ; Gladys rend l'arrêt quand elle lit ce réglage, différent
+  de celui noté et autre qu'Arrêt, deux lectures de suite ;
+- quand l'adresse est retirée de la configuration, ou l'appareil supprimé
+  dans Gladys.
+
+Le statut et **Pilotage tenu par Gladys** disent depuis quand il est tenu.
+En dernier recours, remettre Ethernet sur autre chose que Modbus TCP à
+l'écran, ou arrêter l'intégration, fait oublier le régulateur sous 5
+minutes ; l'arrêt gardé dans `/data` est réécrit quand l'intégration
+redémarre.
 
 On ne sait pas si l'écran ou le bloc 1000 l'emporte pendant que Gladys
 tient une valeur (jamais testé avec un vrai CTC).
@@ -112,10 +127,13 @@ tient une valeur (jamais testé avec un vrai CTC).
 _Chauffage arrêté_ (mode de zone du circuit 1 = arrêt) est la commande
 protectrice. Elle fonctionne **même si « Autoriser les commandes » est
 désactivé**, tant que le régulateur n'a pas encore été lu, après une lecture
-en échec, et quand `/data` ne peut être écrit. Elle ne passe pas derrière
-les lectures en file : elle attend seulement la fin de la requête Modbus en
-cours (sa réponse, ou 5 s de silence : CTC ne traite qu'une requête à la
-fois), puis part la première.
+en échec, et quand `/data` ne peut être écrit ou est lent. Elle ne passe pas
+derrière les lectures en file, mais CTC ne traite qu'une requête à la
+fois : elle attend la fin de l'échange Modbus en cours (en général une
+fraction de seconde ; jusqu'à 7 s environ derrière une réécriture dont la
+relecture d'identité et l'écriture restent sans réponse), puis part la
+première. Sa propre réponse est attendue 5 s ; la ligne reste ouverte après
+un silence.
 
 Elle n'est refusée que si aucune adresse de régulateur n'est connue : ni
 dans la configuration, ni gardée dans `/data` (l'adresse de l'arrêt, ou la
@@ -126,20 +144,22 @@ jusqu'à 5 minutes, tant que Gladys ne répond pas), elle l'attend jusqu'à
 
 Elle est gardée dans `/data` avec son adresse et sa date : après un
 redémarrage de l'intégration, elle est réécrite aussitôt, avant même la
-lecture de la configuration, sauf si elle a plus de 24 heures. Quand la
-configuration donne une nouvelle adresse, elle n'y est écrite qu'une fois
-un CTC identifié à cette adresse.
+lecture de la configuration. Quand la configuration donne une nouvelle
+adresse, elle n'y est écrite qu'une fois un CTC identifié à cette adresse
+(la même version du logiciel de l'écran qu'avant, si elle était connue) ;
+cette attente est aussi gardée dans `/data`.
 
 Si le régulateur ne l'acquitte pas sous 3,5 s, Gladys répond qu'elle est
 enregistrée et pas encore acquittée ; s'il la refuse (exception Modbus 1, 2
-ou 3), Gladys le dit. Dans les deux cas elle est gardée et réessayée : après
-15 s, puis deux fois plus tard à chaque fois, jusqu'à 5 minutes (30 minutes
-après un refus). Une fois acquittée, elle est réécrite chaque minute.
+ou 3), Gladys le dit. Dans les deux cas elle est gardée et réessayée dès que
+la ligne est libre, puis après 15 s, puis deux fois plus tard à chaque fois,
+jusqu'à 5 minutes (30 minutes après un refus). Une fois acquittée, elle est
+réécrite chaque minute.
 
 Un mode plus récent (_Chauffage_, _Auto_) la remplace une fois son écriture
-partie ; `/data` est écrit avant. Si le régulateur refuse ce mode, l'arrêt
-reste. Une commande demandée avant l'arrêt et pas encore envoyée est
-annulée.
+partie ; `/data` est écrit avant, avant de prendre la ligne. Si le
+régulateur refuse ce mode, l'arrêt reste. Une commande demandée avant
+l'arrêt et pas encore envoyée est annulée.
 
 On ne sait pas si CTC garde sa protection contre le gel en mode de zone
 arrêt : vérifiez-le sur votre installation avant de vous y fier en hiver.

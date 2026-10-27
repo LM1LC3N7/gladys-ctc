@@ -20,5 +20,7 @@ the notes of the version's GitHub Release.
   "Allow the commands" (off by default); "Heating off" always available,
   kept in `/data` and written again at start.
 - "Test the connection" and "Give control back to the heat pump" buttons.
-- What Gladys holds ends after 24 hours or when the setting is changed at
-  the panel; the configuration is read again until Gladys answers.
+- A setpoint or mode held by Gladys ends after 24 hours or when the setting
+  is changed at the panel; the heating off ends only by a click with the
+  option, the panel (two readings in a row) or removing the address; the
+  configuration is read again until Gladys answers.

@@ -12,7 +12,8 @@
 //   - silence (no answer to a read) is how CTC says a register is missing:
 //     the request fails TIMEOUT, the connection stays (as the reference on
 //     real units) and the transaction id is remembered, so a late answer is
-//     recognised and dropped, never taken for the next one;
+//     recognised and dropped, never taken for the next one; a write without
+//     answer is handled the same way (`sent`: it may have been applied);
 //   - paced: 60 ms between transactions, 3 s after the socket opens, 10 s
 //     after a close before a new connection (the controller's settle time);
 //   - bounded: a frame is 260 bytes at most; a byte that belongs to no
@@ -255,7 +256,7 @@ export class ModbusClient {
     ]);
     // The answer of a write: its function, address and quantity, exactly.
     const echo = pdu.subarray(0, 5);
-    return this.transact(pdu, { ...options, write: true }, (answer) => {
+    return this.transact(pdu, options, (answer) => {
       if (!answer.equals(echo)) {
         throw new ModbusError(ERROR_KINDS.PROTOCOL, { sent: true, detail: 'echo' });
       }
@@ -272,7 +273,7 @@ export class ModbusClient {
    * connected, right before the bytes leave; what it throws is rethrown
    * with `beforeSend: true`, nothing sent.
    */
-  async transact(pdu, { startBy, answerBy, answerWithin, beforeSend, write = false }, check) {
+  async transact(pdu, { startBy, answerBy, answerWithin, beforeSend }, check) {
     if (this.closed) {
       throw new ModbusError(ERROR_KINDS.UNREACHABLE);
     }
@@ -329,14 +330,14 @@ export class ModbusClient {
           if (this.pending !== pending) {
             return;
           }
-          const partial = this.inbox.length > 0;
-          if (write || partial) {
-            // A write without its answer, or half an answer: the line is
-            // not trusted any more.
+          if (this.inbox.length > 0) {
+            // Half an answer: the line is not trusted any more.
             this.fail(pending, new ModbusError(ERROR_KINDS.TIMEOUT, { sent: true }), true);
             return;
           }
-          // Silence: the connection stays, a late answer will be dropped.
+          // Silence (a read or a write): the connection stays, so that a
+          // heating stop waiting behind it leaves at once, without the
+          // controller's 10 s settle; a late answer will be dropped.
           this.abandon(pending);
           pending.reject(new ModbusError(ERROR_KINDS.TIMEOUT, { sent: true }));
         },

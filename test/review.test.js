@@ -66,7 +66,11 @@ test('a change at the panel gives the hold back: no more writes, /data cleared, 
   await ctx.wait(65 * SECOND);
   ctx.ctc.registers[61542] = 1;
   ctx.ctc.registers[61509] = 230;
+  // The room setpoint goes on one reading; the heating off on two in a row.
   await ctx.wait(31 * SECOND);
+  assert.equal(ctx.app.holds.size, 0);
+  assert.ok(ctx.app.heatingStop, 'one reading is not enough for the stop');
+  await ctx.wait(30 * SECOND);
   assert.equal(ctx.app.heatingStop, undefined);
   assert.equal(ctx.app.holds.size, 0);
   assert.equal(ctx.store.data.stop, undefined);
@@ -88,25 +92,146 @@ test('a panel value not read gives nothing back', async () => {
   await ctx.app.stop();
 });
 
-test('what Gladys holds ends after 24 hours, the heating off included; not resumed after that', async () => {
+test('the 24-hour end: the held values, never the heating off (also after a restart)', async () => {
   const ctx = await setup({ config: ALLOWED });
   await command(ctx, 'dhw-mode', 'economy');
   await ctx.wait(3 * SECOND);
   await command(ctx, 'heating-mode', 'off');
   await ctx.wait(24 * HOUR + MINUTE, 5 * SECOND);
-  assert.equal(ctx.app.heatingStop, undefined);
-  assert.equal(ctx.app.holds.size, 0);
-  assert.equal(ctx.store.data.stop, undefined);
+  assert.equal(ctx.app.holds.size, 0, 'the hot water mode given back');
+  assert.ok(ctx.app.heatingStop, 'the heating off stays');
+  assert.equal(ctx.store.data.stop.host, '192.168.1.80');
+  assert.equal(ctx.app.controls()['heating-mode'], 'off');
+  assert.match(ctx.gladys.fake.connectionStatus.message.fr, /tenu par Gladys depuis le 2026-10-27/);
   await ctx.app.stop();
   const old = createMemoryStore({
     version: 1,
-    stop: { host: '192.168.1.80', port: 502, since: Date.UTC(2026, 9, 25) },
+    stop: { host: '192.168.1.80', port: 502, since: Date.UTC(2026, 9, 1) },
   });
   const again = await setup({ store: old, start: false });
   again.app.resume();
   await again.wait(5 * SECOND);
-  assert.equal(again.ctc.writes.length, 0);
+  assert.deepEqual(
+    writesTo(again.ctc, 1015).map((w) => w.value),
+    [0],
+  );
   await again.app.stop();
+});
+
+test('the panel and the heating off: one odd reading, Off, or an unreadable value keep it', async () => {
+  const ctx = await setup();
+  const reads = () => ctx.ctc.log.filter((l) => l === 'r:61542+1').length;
+  /** Sets 61542, then waits for exactly one more round to read it. */
+  const round = async (value) => {
+    ctx.ctc.registers[61542] = value;
+    const n = reads();
+    while (reads() === n) await ctx.wait(500, 50);
+    await ctx.wait(500, 50);
+  };
+  await command(ctx, 'heating-mode', 'off');
+  await round(0);
+  await round(0);
+  assert.equal(ctx.app.heatingStop.panel, 0);
+  const seen = [];
+  for (const value of [1, 0, 2, 2, 9999, 9999, 1, 9999, 1, 2, 1]) {
+    await round(value);
+    assert.ok(ctx.app.heatingStop, `kept after ${value} at ${seen.length}`);
+    seen.push(value);
+  }
+  // A second On in a row: given back, the noted and read values logged.
+  await round(1);
+  assert.equal(ctx.app.heatingStop, undefined);
+  assert.ok(ctx.lines.some((l) => /61542 noted 0, read 1 twice/.test(l)));
+  await ctx.app.stop();
+});
+
+test('a held value read at the panel then unreadable is kept', async () => {
+  const ctx = await setup({ config: ALLOWED });
+  await command(ctx, 'room-setpoint', 19);
+  await ctx.wait(65 * SECOND);
+  assert.equal(ctx.app.holds.get('room-setpoint').panel, 21);
+  ctx.ctc.registers[61509] = 32767;
+  await ctx.wait(2 * MINUTE);
+  assert.ok(ctx.app.holds.has('room-setpoint'));
+  await ctx.app.stop();
+});
+
+test('a heating off write without answer frees the line in 5 s', async () => {
+  const ctx = await setup();
+  ctx.ctc.behave = (r) => (r.fn === 16 ? 'silent' : undefined);
+  const set = ctx.app.setValue({}, { external_id: ID('heating-mode') }, 'off');
+  ctx.during(set);
+  await ctx.wait(50, 10);
+  const sentAt = ctx.clock.monotonic();
+  const round = ctx.app.tick();
+  await ctx.during(round, 20 * SECOND);
+  const readAt = ctx.ctc.requests.findIndex((r) => r.fn === 3 && r.address === 62000);
+  assert.ok(readAt >= 0);
+  assert.ok(ctx.clock.monotonic() - sentAt < 9 * SECOND, 'the round ran soon after');
+  assert.equal(ctx.ctc.connections, 1, 'the line kept');
+  await ctx.app.stop();
+});
+
+test('a stop moved to a new address keeps waiting for a CTC after a restart', async () => {
+  const ctx = await setup();
+  await command(ctx, 'heating-mode', 'off');
+  for (const key of Object.keys(ctx.ctc.registers)) ctx.ctc.registers[key] = 0;
+  await ctx.during(ctx.app.configUpdated({ address: '192.168.1.81' }));
+  assert.equal(ctx.store.data.stop.waitIdentify, true);
+  assert.equal(ctx.store.data.stop.expectIdentity, '2023.1203');
+  await ctx.app.stop();
+  const again = await setup({ store: ctx.store, ctc: ctx.ctc, start: false });
+  const before = again.ctc.writes.length;
+  again.app.resume();
+  await again.wait(10 * SECOND);
+  assert.equal(again.ctc.writes.length, before, 'not written before a CTC is identified');
+  // Another controller (another identity) there: still not written.
+  Object.assign(again.ctc.registers, { 62000: 10, 62244: 101, 62245: 2025 });
+  await again.during(again.app.connected({ address: '192.168.1.81' }));
+  await again.wait(MINUTE);
+  assert.equal(again.ctc.writes.length, before);
+  // The CTC known before: written.
+  Object.assign(again.ctc.registers, { 62244: 1203, 62245: 2023 });
+  await again.wait(2 * MINUTE);
+  assert.ok(again.ctc.writes.length > before);
+  await again.app.stop();
+});
+
+test('the address removed or the device deleted gives the heating off back', async () => {
+  const ctx = await setup();
+  await command(ctx, 'heating-mode', 'off');
+  await ctx.during(ctx.app.configUpdated({ address: '' }));
+  assert.equal(ctx.app.heatingStop, undefined);
+  assert.equal(ctx.store.data.stop, undefined);
+  await ctx.app.stop();
+  const two = await setup();
+  await command(two, 'heating-mode', 'off');
+  await two.during(two.app.deviceDeleted({ external_id: 'ext:ctc:heat-pump:ctc' }));
+  assert.equal(two.app.heatingStop, undefined);
+  await two.app.stop();
+});
+
+test('a slow /data never holds a heating off back', async () => {
+  const ctx = await setup({ config: ALLOWED });
+  await command(ctx, 'heating-mode', 'off');
+  await ctx.wait(3 * SECOND);
+  const save = ctx.store.save;
+  ctx.store.save = (data) =>
+    new Promise((resolve) => ctx.clock.timers.setTimeout(resolve, 8000)).then(() =>
+      save.call(ctx.store, data),
+    );
+  const heat = ctx.app.setValue({}, { external_id: ID('heating-mode') }, 'heat');
+  await ctx.wait(100, 10);
+  const asked = ctx.clock.monotonic();
+  const out = await command(ctx, 'heating-mode', 'off');
+  assert.equal(out.error, undefined);
+  assert.ok(ctx.clock.monotonic() - asked < 3600);
+  await ctx.during(
+    heat.catch(() => {}),
+    60 * SECOND,
+  );
+  assert.ok(ctx.app.heatingStop);
+  await ctx.app.stop();
 });
 
 test('a lapsed stop: the select shows what the controller follows, the status says lapsed', async () => {

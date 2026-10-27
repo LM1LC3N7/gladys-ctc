@@ -130,7 +130,7 @@ test('an oversized answer is cut before it is read whole', async (t) => {
   await assert.rejects(c.readHolding(62000, 1), (err) => err.kind === ERROR_KINDS.PROTOCOL);
 });
 
-test('a write without answer drops the line; a write exception keeps it', async (t) => {
+test('a write without answer and a write exception both keep the line', async (t) => {
   let mode = 'silent';
   const device = await modbusDevice((req) =>
     mode === 'silent' ? undefined : frame(req.readUInt16BE(0), [0x90, 3]),
@@ -147,7 +147,7 @@ test('a write without answer drops the line; a write exception keeps it', async 
     c.session((raw) => raw.writeRegister(1010, 210)),
     (err) => err.kind === ERROR_KINDS.EXCEPTION && err.code === 3,
   );
-  assert.equal(device.connections, 2);
+  assert.equal(device.connections, 1);
 });
 
 test('never a pipeline: a stop waits for the read in flight, then passes before queued reads', async (t) => {
