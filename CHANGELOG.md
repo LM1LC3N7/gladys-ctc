@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-27
+
 ### Added
 
 - First version: CTC heat pumps over local Modbus TCP (BMS interface of the
@@ -24,3 +26,6 @@ the notes of the version's GitHub Release.
   is changed at the panel; the heating off ends only by a click with the
   option, the panel (two readings in a row) or removing the address; the
   configuration is read again until Gladys answers.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-ctc/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-ctc/releases/tag/v0.1.1
