@@ -137,6 +137,11 @@ export const ENUM_NAMES = {
     cooling: both('Compressor on, cooling', 'Compresseur en marche, rafraîchissement'),
     blocked: both('Compressor off, blocked', 'Compresseur arrêté, bloqué'),
     alarm: both('Compressor off, alarm', 'Compresseur arrêté, alarme'),
+    functionTest: both('Function test', 'Test de fonctionnement'),
+    notDefined: both('Not defined', 'Non défini'),
+    notAvailable: both('Not available', 'Non disponible'),
+    communicationError: both('Communication error', 'Erreur de communication'),
+    hotWater: both('Compressor on, hot water', 'Compresseur en marche, eau chaude'),
   },
   heating: {
     heatingOff: both('Heating off', 'Chauffage arrêté'),
@@ -170,17 +175,32 @@ export const HOLD_TEXTS = {
     'None: the controller follows its own settings.',
     'Aucun : le régulateur suit ses propres réglages.',
   ),
-  inForce: (name, ago) =>
-    both(`${name.en} (written ${ago.en} ago)`, `${name.fr} (écrit il y a ${ago.fr})`),
+  since: (name, date) => both(`${name.en} (since ${date})`, `${name.fr} (depuis ${date})`),
   stopPending: both(
-    'Heating off asked, not yet acknowledged by the controller: written again until it is.',
-    "Arrêt du chauffage demandé, pas encore acquitté par le régulateur : réécrit jusqu'à ce qu'il le soit.",
+    'Heating off asked, not yet acknowledged by the controller: tried again, spaced.',
+    'Arrêt du chauffage demandé, pas encore acquitté par le régulateur : réessayé, à intervalles croissants.',
   ),
-  stopLapsed: (ago) =>
+  stopWaiting: both(
+    'Heating off asked, waiting for a CTC to be identified at the new address.',
+    "Arrêt du chauffage demandé, en attente d'un CTC identifié à la nouvelle adresse.",
+  ),
+  stopLapsed: (date) =>
     both(
-      `Heating off asked, not in force (no write acknowledged for ${ago.en}): written again until it is.`,
-      `Arrêt du chauffage demandé, pas en vigueur (aucune écriture acquittée depuis ${ago.fr}) : réécrit jusqu'à ce qu'il le soit.`,
+      `Heating off asked, not in force (last acknowledged ${date}): tried again; the controller follows its own program.`,
+      `Arrêt du chauffage demandé, pas en vigueur (dernier acquittement ${date}) : réessayé ; le régulateur suit son propre programme.`,
     ),
+  stopRefused: (code) =>
+    both(
+      `Heating off refused by the controller (Modbus exception ${code}): tried again, spaced.`,
+      `Arrêt du chauffage refusé par le régulateur (exception Modbus ${code}) : réessayé, à intervalles espacés.`,
+    ),
+  endedByPanel: (name) =>
+    both(
+      `${name.en} given back: the setting was changed at the panel.`,
+      `${name.fr} rendu : le réglage a été changé sur l'écran du régulateur.`,
+    ),
+  endedByTime: (name) =>
+    both(`${name.en} given back after 24 hours.`, `${name.fr} rendu au bout de 24 heures.`),
   roomSetpoint: (value) =>
     both(`Room setpoint ${value} °C`, `Consigne de la pièce ${String(value).replace('.', ',')} °C`),
 };
@@ -193,6 +213,11 @@ export const T = {
   ),
   invalid: (typed) =>
     both(`"${typed}" is not a valid address.`, `« ${typed} » n'est pas une adresse valide.`),
+  configFailed: (wait) =>
+    both(
+      `The configuration could not be read from Gladys; next try in ${wait.en}.`,
+      `La configuration n'a pas pu être lue depuis Gladys ; nouvel essai dans ${wait.fr}.`,
+    ),
   connecting: both('Connecting to the CTC controller...', 'Connexion au régulateur CTC...'),
   unreachable: (address, reason, wait) =>
     both(
@@ -213,11 +238,24 @@ export const T = {
         `Registers this model does not answer, left out: ${blocks}.`,
         `Registres auxquels ce modèle ne répond pas, ignorés : ${blocks}.`,
       ),
-    stop: both('Heating off held by Gladys.', 'Arrêt du chauffage tenu par Gladys.'),
-    stopPending: both(
-      'Heating off asked, not yet acknowledged: written again until it is.',
-      "Arrêt du chauffage demandé, pas encore acquitté : réécrit jusqu'à ce qu'il le soit.",
+    stop_inForce: both('Heating off held by Gladys.', 'Arrêt du chauffage tenu par Gladys.'),
+    stop_pending: both(
+      'Heating off asked, not yet acknowledged: tried again, spaced.',
+      'Arrêt du chauffage demandé, pas encore acquitté : réessayé, à intervalles croissants.',
     ),
+    stop_lapsed: both(
+      'Heating off asked, no longer acknowledged: not in force, tried again.',
+      'Arrêt du chauffage demandé, plus acquitté : pas en vigueur, réessayé.',
+    ),
+    stop_waiting: both(
+      'Heating off waiting for a CTC to be identified at the new address.',
+      "Arrêt du chauffage en attente d'un CTC identifié à la nouvelle adresse.",
+    ),
+    stopRefused: (code) =>
+      both(
+        `Heating off refused by the controller (Modbus exception ${code}).`,
+        `Arrêt du chauffage refusé par le régulateur (exception Modbus ${code}).`,
+      ),
     store: both(
       'The state file in /data cannot be read or written: a heating off would not be written again after a restart.',
       "Le fichier d'état dans /data ne peut être lu ou écrit : un arrêt du chauffage ne serait pas réécrit après un redémarrage.",
@@ -247,6 +285,15 @@ export const T = {
 /** The errors a command answers to Gladys. */
 export const ERRORS = {
   readOnly: both('This feature is read only.', 'Cette fonctionnalité est en lecture seule.'),
+  configNotRead: both(
+    'The configuration has not been read from Gladys yet and no controller address is known: nothing sent.',
+    "La configuration n'a pas encore été lue depuis Gladys et aucune adresse de régulateur n'est connue : rien envoyé.",
+  ),
+  stopRefused: (code) =>
+    both(
+      `The controller refused the heating off (Modbus exception ${code}): kept, tried again, spaced.`,
+      `Le régulateur a refusé l'arrêt du chauffage (exception Modbus ${code}) : gardé, réessayé à intervalles espacés.`,
+    ),
   noAddress: both(
     'No controller address in the configuration: nothing sent.',
     'Aucune adresse de régulateur dans la configuration : rien envoyé.',
@@ -318,7 +365,7 @@ export const ERRORS = {
     "Le fichier d'état dans /data n'a pas pu être écrit : rien n'a changé.",
   ),
   stopNotYet: both(
-    'Heating off recorded, not yet acknowledged by the controller: written again every 15 s until it is.',
-    "Arrêt du chauffage enregistré, pas encore acquitté par le régulateur : réécrit toutes les 15 s jusqu'à ce qu'il le soit.",
+    'Heating off recorded, not yet acknowledged by the controller: tried again from 15 s on until it is.',
+    "Arrêt du chauffage enregistré, pas encore acquitté par le régulateur : réessayé dès 15 s jusqu'à ce qu'il le soit.",
   ),
 };

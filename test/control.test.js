@@ -48,23 +48,21 @@ test('heating off is never refused: offline controller, /data failing, getConfig
   await ctx.app.stop();
 });
 
-test('heating off cuts a silent read after 1 s and leaves within 1.5 s; the read is not a failure', async () => {
+test('heating off never pipelined: it waits for the silent read, then passes before the queued reads', async () => {
   const ctc = fakeCtc();
   const ctx = await setup({ ctc });
   ctc.behave = (r) => (r.fn === 3 && r.address === 62191 ? 'silent' : undefined);
   const round = ctx.app.tick();
-  // Up to the silent block.
   await ctx.wait(400, 10);
   assert.ok(ctc.log.at(-1).startsWith('r:62191'), ctc.log.at(-1));
-  const asked = ctx.clock.monotonic();
   const out = await command(ctx, 'heating-mode', 'off', 4 * SECOND);
-  assert.equal(out.error, undefined);
-  const write = writesTo(ctc, 1015)[0];
-  assert.ok(write, 'written');
-  assert.ok(ctx.clock.monotonic() - asked < 2 * SECOND);
+  // The read times out after 5 s: not acknowledged within 3.5 s, said so.
+  assert.match(out.error.message, /pas encore acquitté/);
   await ctx.during(round);
-  assert.equal(ctx.app.online, true, 'the cut read is not a failed round');
-  assert.equal(ctx.app.silent.get(62191), undefined, 'nor a silence');
+  const at = ctc.log.indexOf('w:1015=0');
+  assert.equal(ctc.log[at - 1], 'r:62191+25', 'right after the silent read');
+  assert.equal(ctc.log[at + 1], 'r:62234+13', 'before the queued reads');
+  assert.equal(ctx.app.heatingStop.ackedAt !== undefined, true);
   await ctx.app.stop();
 });
 

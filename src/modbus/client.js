@@ -21,8 +21,9 @@
 //     before anything else (the stored settings wear out);
 //   - `sent` says whether the request may have left: a write that may have
 //     reached the controller is never reported "not sent";
-//   - `cut()`: a heating stop waiting for the line abandons a read that has
-//     received nothing for 1 s (CUT, not a failure), the connection stays.
+//   - never a pipeline, not even for a heating stop: the stop waits for the
+//     end of the request in flight (its answer or its timeout), then passes
+//     before everything queued (the Gate levels).
 // -----------------------------------------------------------------------------
 
 import net from 'node:net';
@@ -42,8 +43,6 @@ export const ERROR_KINDS = {
   EXCEPTION: 'exception',
   /** Still waiting for its turn (or its connection) at its deadline: nothing was sent. */
   LATE: 'late',
-  /** A read abandoned for a heating stop. */
-  CUT: 'cut',
   /** An address this integration never writes: nothing was sent. */
   FORBIDDEN: 'forbidden',
 };
@@ -75,14 +74,13 @@ export const LEVEL = { STOP: 0, COMMAND: 1, READ: 2 };
 
 /**
  * One job at a time; a lower level passes before a higher one but never
- * cuts the job running (only `onUrgent` may, for a stop). A job still
- * queued at `startBy` (monotonic) leaves the queue, rejected LATE.
+ * cuts the job running. A job still queued at `startBy` (monotonic) leaves
+ * the queue, rejected LATE.
  */
 export class Gate {
-  constructor({ timers = globalThis, monotonic = () => performance.now(), onUrgent } = {}) {
+  constructor({ timers = globalThis, monotonic = () => performance.now() } = {}) {
     this.timers = timers;
     this.monotonic = monotonic;
-    this.onUrgent = onUrgent;
     this.queue = [];
     this.running = undefined;
   }
@@ -104,20 +102,8 @@ export class Gate {
       }
       const at = this.queue.findIndex((queued) => queued.level > level);
       this.queue.splice(at === -1 ? this.queue.length : at, 0, job);
-      if (level === LEVEL.STOP && this.running && this.running.level !== LEVEL.STOP) {
-        this.onUrgent?.();
-      }
       this.pump();
     });
-  }
-
-  /** A stop is waiting behind a job of another level. */
-  get urgent() {
-    return (
-      this.queue.some((job) => job.level === LEVEL.STOP) &&
-      this.running !== undefined &&
-      this.running.level !== LEVEL.STOP
-    );
   }
 
   /** Rejects every queued job (a stop, another address). */
@@ -166,7 +152,7 @@ export class ModbusClient {
     this.monotonic = monotonic;
     this.timings = timings;
     this.logger = logger;
-    this.gate = new Gate({ timers, monotonic, onUrgent: () => this.watchUrgent() });
+    this.gate = new Gate({ timers, monotonic });
     this.socket = undefined;
     this.connecting = undefined;
     this.pending = undefined;
@@ -177,7 +163,6 @@ export class ModbusClient {
     this.lastRequestAt = -Infinity;
     this.closedAt = -Infinity;
     this.readyAt = -Infinity;
-    this.urgentTimer = undefined;
     /** Counts the connections opened (session state is reset on each). */
     this.connections = 0;
     /** Called with no argument when a connection is opened or lost. */
@@ -203,54 +188,11 @@ export class ModbusClient {
   /** Drops the connection and every queued job (a stop, another address). */
   close() {
     this.closed = true;
-    this.stopWatching();
     this.gate.clear(new ModbusError(ERROR_KINDS.UNREACHABLE));
     this.drop(new ModbusError(ERROR_KINDS.CLOSED, { sent: true }));
   }
 
-  // --- A stop waiting --------------------------------------------------------------
-
-  watchUrgent() {
-    if (this.urgentTimer !== undefined) {
-      return;
-    }
-    const check = () => {
-      this.urgentTimer = undefined;
-      if (!this.gate.urgent || this.closed) {
-        return;
-      }
-      this.cut();
-      this.urgentTimer = this.timers.setTimeout(check, this.timings.cutCheck);
-    };
-    check();
-  }
-
-  stopWatching() {
-    if (this.urgentTimer !== undefined) {
-      this.timers.clearTimeout(this.urgentTimer);
-      this.urgentTimer = undefined;
-    }
-  }
-
-  /**
-   * Abandons the read in flight when it has received nothing for
-   * `cutAfter`: it fails CUT (not counted as a failure nor a silence),
-   * its late answer will be dropped, the connection stays. A write is
-   * never cut. Returns whether it was.
-   */
-  cut() {
-    const pending = this.pending;
-    if (!pending || pending.fn !== FUNCTION.READ_HOLDING || this.inbox.length > 0) {
-      return false;
-    }
-    if (this.monotonic() - pending.lastByteAt < this.timings.cutAfter) {
-      return false;
-    }
-    this.abandon(pending);
-    pending.reject(new ModbusError(ERROR_KINDS.CUT, { sent: true }));
-    return true;
-  }
-
+  /** A read given up (silence): its late answer will be dropped, the line stays. */
   abandon(pending) {
     this.settle(pending);
     this.abandoned.push(pending.tid);
@@ -324,11 +266,13 @@ export class ModbusClient {
   /**
    * One request and its answer. `answerBy` (monotonic): the last moment to
    * wait for its answer (default: now + readTimeout); `startBy`: the last
-   * moment the request may leave. `beforeSend`: a last check run once
+   * moment the request may leave; `answerWithin`: the answer is awaited
+   * this long after the bytes leave (then `answerBy` only bounds the wait
+   * for the connection). `beforeSend`: a last check run once
    * connected, right before the bytes leave; what it throws is rethrown
    * with `beforeSend: true`, nothing sent.
    */
-  async transact(pdu, { startBy, answerBy, beforeSend, write = false }, check) {
+  async transact(pdu, { startBy, answerBy, answerWithin, beforeSend, write = false }, check) {
     if (this.closed) {
       throw new ModbusError(ERROR_KINDS.UNREACHABLE);
     }
@@ -370,6 +314,7 @@ export class ModbusClient {
     frame.writeUInt16BE(pdu.length + 1, 4);
     frame.writeUInt8(this.unitId, 6);
     pdu.copy(frame, HEADER);
+    const until = answerWithin === undefined ? end : this.monotonic() + answerWithin;
     return new Promise((resolve, reject) => {
       const pending = {
         tid,
@@ -378,7 +323,6 @@ export class ModbusClient {
         resolve,
         reject,
         timer: undefined,
-        lastByteAt: this.monotonic(),
       };
       pending.timer = this.timers.setTimeout(
         () => {
@@ -396,7 +340,7 @@ export class ModbusClient {
           this.abandon(pending);
           pending.reject(new ModbusError(ERROR_KINDS.TIMEOUT, { sent: true }));
         },
-        Math.max(0, end - this.monotonic()),
+        Math.max(0, until - this.monotonic()),
       );
       this.pending = pending;
       this.lastRequestAt = this.monotonic();
@@ -513,9 +457,6 @@ export class ModbusClient {
   receive(socket, chunk) {
     if (socket !== this.socket) {
       return;
-    }
-    if (this.pending) {
-      this.pending.lastByteAt = this.monotonic();
     }
     this.inbox = Buffer.concat([this.inbox, chunk]);
     while (this.socket === socket && this.inbox.length >= HEADER) {

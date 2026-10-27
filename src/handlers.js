@@ -28,10 +28,11 @@ export function registerHandlers(gladys, app, logger) {
   // Configuration saved by the user.
   gladys.onConfigUpdated((config) => app.configUpdated(config));
 
-  // Connection lifecycle (also after every reconnection to Gladys).
+  // Connection lifecycle (also after every reconnection to Gladys): the
+  // configuration is read again and again until it comes (src/app.js).
   gladys.on('connected', async () => {
     try {
-      await app.connected(await gladys.getConfig());
+      await app.connectedFrom(() => gladys.getConfig());
     } catch (err) {
       logger?.error('Start failed', err);
     }

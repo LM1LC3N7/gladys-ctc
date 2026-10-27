@@ -115,10 +115,6 @@ export const TIMINGS = {
   messageGap: 60,
   /** A read without answer: silence, how CTC says a register is missing. */
   readTimeout: 5 * SECOND,
-  /** A heating stop cuts a read that has received nothing for this long. */
-  cutAfter: SECOND,
-  /** While a stop waits, the read in flight is looked at this often. */
-  cutCheck: 200,
   /** Failed polls: 30 s, 1, 2, then 5 minutes, never shorter than the interval. */
   backoff: [30 * SECOND, MINUTE, 2 * MINUTE, 5 * MINUTE],
   /** The publisher sends what is pending every second; unchanged states again every 30 min. */
@@ -138,10 +134,24 @@ export const TIMINGS = {
   commandMinRead: 300,
   /** The ack of a heating stop is given by then, whatever the write does. */
   stopAckBy: 3_500,
+  /** The answer of a heating stop write is awaited this long after it left. */
+  stopAnswerWithin: 5 * SECOND,
+  /**
+   * A heating stop not acknowledged is tried again after 15 s, then twice
+   * as long each time, up to 5 minutes (30 minutes when the controller
+   * refused it).
+   */
+  stopRetryMax: 5 * MINUTE,
+  stopRefusedRetryMax: 30 * MINUTE,
+  /** What Gladys holds (the heating off included) ends after 24 hours. */
+  holdMax: 24 * HOUR,
+  /** A configuration that could not be read: read again after 5 s, doubled up to 5 min. */
+  configRetry: 5 * SECOND,
+  configRetryMax: 5 * MINUTE,
   /**
    * The 1000 block is volatile: the controller forgets a value 5 minutes
    * after the last write (BMS manual). Held values are written again every
-   * minute; a heating stop not written for a minute is retried every 15 s.
+   * minute; a heating stop not acknowledged is retried from 15 s on.
    */
   keepalive: MINUTE,
   stopRetry: 15 * SECOND,

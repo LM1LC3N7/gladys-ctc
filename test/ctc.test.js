@@ -43,13 +43,18 @@ test('an i255: temperatures signed in tenths, markers dropped, pairs LSB first, 
 test('the manual codes, unknown codes kept as codes, missing words unknown', () => {
   const v = decode(raw({ 62005: 7, 62017: 30, 62246: 0 }));
   assert.equal(v[F.SYSTEM_STATUS].key, 'off', 'manual 2026: 7 = Off');
-  assert.deepEqual(v[F.HEATPUMP_STATUS], { code: 30, key: undefined });
-  assert.equal(v[F.COMPRESSOR], undefined, 'no flag from an unknown code');
+  assert.deepEqual(v[F.HEATPUMP_STATUS], { code: 30, key: 'notDefined' });
+  assert.equal(v[F.COMPRESSOR], undefined, 'no flag from a code that says nothing of it');
+  assert.equal(decode(raw({ 62017: 33 }))[F.COMPRESSOR], 1, '33: hot water, compressor on');
+  assert.equal(decode(raw({ 62017: 99 }))[F.COMPRESSOR], undefined, 'unknown code');
+  assert.equal(decode(raw({ 62017: 99 }))[F.HEATPUMP_STATUS].key, undefined);
   assert.equal(v[F.HEATING_STATUS].key, 'heatingOff');
   assert.equal(decode(new Map())[F.TEMP_OUTDOOR], undefined);
 });
 
 test('out of range or a pair of all ones is not a value', () => {
+  assert.equal(decode(raw({ 62191: 9999 }))[F.IMMERSION_ENERGY], 9999, 'unsigned: a real 9999 kWh');
+  assert.equal(decode(raw({ 62191: 32767 }))[F.IMMERSION_ENERGY], 32767);
   const v = decode(raw({ 62000: 2000, 62341: 0xffff, 62342: 0xffff, 62214: 5, 62191: 0xffff }));
   assert.equal(v[F.TEMP_OUTDOOR], undefined);
   assert.equal(v[F.COMPRESSOR_ENERGY], undefined);

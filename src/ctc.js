@@ -71,6 +71,12 @@ export const ENUMS = {
     5: 'cooling',
     6: 'blocked',
     7: 'alarm',
+    // Beyond the manual's 0-7: the codes the reference reads on real units.
+    8: 'functionTest',
+    30: 'notDefined',
+    31: 'notAvailable',
+    32: 'communicationError',
+    33: 'hotWater',
   },
   heating: { 0: 'heatingOff', 1: 'vacation', 2: 'nightReduction', 3: 'on' },
   smartgrid: { 0: 'normal', 1: 'block', 2: 'lowPrice', 3: 'highCapacity' },
@@ -78,8 +84,14 @@ export const ENUMS = {
   heatingModeSetting: { 0: 'auto', 1: 'on', 2: 'off' },
 };
 
-/** Heat pump status codes behind the flags (manual 62017). */
-export const COMPRESSOR_CODES = new Set([3, 5]);
+/**
+ * Heat pump status codes behind the flags (manual 62017, and 33 = hot water
+ * charge, compressor on, from the reference). Codes saying nothing about
+ * the compressor (8 function test, 30-32 not defined, not available,
+ * communication error, unknown codes) give no flag.
+ */
+export const COMPRESSOR_CODES = new Set([3, 5, 33]);
+export const STOPPED_CODES = new Set([0, 1, 2, 4, 6, 7]);
 export const DEFROST_CODE = 4;
 export const ALARM_CODE = 7;
 
@@ -186,7 +198,8 @@ function decodeOne(def, raw) {
     return { code, key: ENUMS[def.enum][code] };
   }
   const number = def.signed ? toSigned(first) : first;
-  if (SENTINELS.has(number) || (!def.signed && number === 0xffff)) {
+  // The markers are signed words; an unsigned counter only has all ones.
+  if ((def.signed && SENTINELS.has(number)) || (!def.signed && number === 0xffff)) {
     return undefined;
   }
   const value = Math.round(number * def.scale * 1000) / 1000;
@@ -206,7 +219,7 @@ export function decode(raw) {
     }
   }
   const status = values[F.HEATPUMP_STATUS];
-  if (status?.key) {
+  if (status && (COMPRESSOR_CODES.has(status.code) || STOPPED_CODES.has(status.code))) {
     values[F.COMPRESSOR] = COMPRESSOR_CODES.has(status.code) ? 1 : 0;
     values[F.DEFROST] = status.code === DEFROST_CODE ? 1 : 0;
     values[F.ALARM] = status.code === ALARM_CODE ? 1 : 0;

@@ -16,8 +16,6 @@ const FAST = {
   closeSettle: 0,
   messageGap: 0,
   readTimeout: 300,
-  cutAfter: 100,
-  cutCheck: 20,
 };
 
 /** Splits glued frames; `reply(frame)` -> Buffer | undefined per request. */
@@ -152,12 +150,12 @@ test('a write without answer drops the line; a write exception keeps it', async 
   assert.equal(device.connections, 2);
 });
 
-test('one request at a time; a stop cuts a read silent for cutAfter, passes before queued reads', async (t) => {
+test('never a pipeline: a stop waits for the read in flight, then passes before queued reads', async (t) => {
   const order = [];
   const device = await modbusDevice((req) => {
     const fn = req[7];
     const address = req.readUInt16BE(8);
-    order.push(`${fn}:${address}`);
+    order.push({ what: `${fn}:${address}`, at: performance.now() });
     if (fn === 3 && address === 62191) return undefined;
     return fn === 3 ? readAnswer(req) : frame(req.readUInt16BE(0), req.subarray(7, 12));
   });
@@ -167,14 +165,16 @@ test('one request at a time; a stop cuts a read silent for cutAfter, passes befo
   const silent = c.readHolding(62191, 25);
   const queued = c.readHolding(62234, 13);
   await new Promise((r) => setTimeout(r, 20));
-  const started = performance.now();
   const stop = c.session((raw) => raw.writeRegister(1015, 0), { level: LEVEL.STOP });
-  await assert.rejects(silent, (err) => err.kind === ERROR_KINDS.CUT);
+  await assert.rejects(silent, (err) => err.kind === ERROR_KINDS.TIMEOUT);
   assert.equal(await stop, 0);
-  const took = performance.now() - started;
-  assert.ok(took < FAST.readTimeout, `${took} ms`);
   await queued;
-  assert.deepEqual(order, ['3:62191', '16:1015', '3:62234']);
+  assert.deepEqual(
+    order.map((o) => o.what),
+    ['3:62191', '16:1015', '3:62234'],
+  );
+  // The stop left only once the read had timed out.
+  assert.ok(order[1].at - order[0].at >= FAST.readTimeout - 5, `${order[1].at - order[0].at} ms`);
   assert.equal(device.peak, 1);
 });
 

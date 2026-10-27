@@ -79,31 +79,67 @@ Trois commandes :
   régulateur : Gladys n'écrit aucune température d'eau chaude.
 - **Consigne de la pièce, circuit 1** : 10 à 30 °C, au dixième de degré.
 
-La fonctionnalité **Pilotage tenu par Gladys** dit ce qui est tenu et quand
-le régulateur l'a acquitté pour la dernière fois.
+Quand rien n'est en vigueur (rien de tenu, ou une tenue que le régulateur
+n'acquitte plus), les commandes montrent ce que suit le régulateur : son
+propre programme, son propre réglage de la pièce. La fonctionnalité
+**Pilotage tenu par Gladys** dit ce qui est tenu et depuis quand, ce qui est
+demandé sans être en vigueur, et la dernière tenue terminée.
+
+### Comment une tenue se termine
+
+Ce que Gladys tient (l'arrêt du chauffage compris) se termine :
+
+- **à l'écran du régulateur** : changez le réglage correspondant (mode de
+  chauffage du circuit 1 pour le mode du circuit et l'arrêt, réglage de la
+  pièce du circuit 1, mode de l'eau chaude). Gladys note ces réglages une
+  fois sa valeur acquittée et rend la tenue dès que l'un d'eux change (un
+  réglage qu'elle ne peut lire ne rend rien) ;
+- **au bout de 24 heures**, d'elle-même ;
+- avec _Programme du régulateur_ ou le bouton **Rendre la main à la pompe à
+  chaleur** (pour l'arrêt : seulement avec « Autoriser les commandes ») ;
+- quand « Autoriser les commandes » est désactivé (sauf l'arrêt), quand la
+  version du logiciel de l'écran change, ou quand le régulateur refuse une
+  valeur (sauf l'arrêt) ;
+- en dernier recours, en remettant Ethernet sur autre chose que Modbus TCP à
+  l'écran, ou en arrêtant l'intégration : le régulateur oublie sous 5
+  minutes.
+
+On ne sait pas si l'écran ou le bloc 1000 l'emporte pendant que Gladys
+tient une valeur (jamais testé avec un vrai CTC).
 
 ### Chauffage arrêté
 
 _Chauffage arrêté_ (mode de zone du circuit 1 = arrêt) est la commande
 protectrice. Elle fonctionne **même si « Autoriser les commandes » est
-désactivé**, tant que le régulateur n'a pas encore été lu, pendant une
-lecture (une lecture muette depuis 1 s est coupée), et quand `/data` ne peut
-être écrit. Elle n'est refusée que si aucune adresse de régulateur n'est
-connue (ni dans la configuration ni gardée dans `/data`), ou pour une valeur
-qui n'est pas exactement une option de la liste.
+désactivé**, tant que le régulateur n'a pas encore été lu, après une lecture
+en échec, et quand `/data` ne peut être écrit. Elle ne passe pas derrière
+les lectures en file : elle attend seulement la fin de la requête Modbus en
+cours (sa réponse, ou 5 s de silence : CTC ne traite qu'une requête à la
+fois), puis part la première.
 
-Elle est gardée dans `/data` avec son adresse : après un redémarrage de
-l'intégration, elle est réécrite aussitôt, avant même la lecture de la
-configuration. Elle est réécrite chaque minute, et toutes les 15 s tant que
-le régulateur ne l'a pas acquittée. Si le régulateur ne l'acquitte pas sous
-3,5 s, Gladys répond qu'elle est enregistrée et pas encore acquittée.
+Elle n'est refusée que si aucune adresse de régulateur n'est connue : ni
+dans la configuration, ni gardée dans `/data` (l'adresse de l'arrêt, ou la
+dernière adresse où un CTC a été identifié). Tant que la configuration n'a
+pas été lue depuis Gladys (elle est relue toutes les 5 s, délai doublé
+jusqu'à 5 minutes, tant que Gladys ne répond pas), elle l'attend jusqu'à
+2,5 s, puis prend l'adresse gardée dans `/data`.
 
-Elle reste jusqu'à ce qu'on la rende : en choisissant _Programme du
-régulateur_, _Chauffage_ ou _Auto_ (cela relance le chauffage, donc il faut
-« Autoriser les commandes »), ou avec le bouton **Rendre la main à la pompe
-à chaleur** (même condition). Un mode plus récent ne la remplace qu'une fois
-son écriture partie ; une commande demandée avant l'arrêt et pas encore
-envoyée est annulée.
+Elle est gardée dans `/data` avec son adresse et sa date : après un
+redémarrage de l'intégration, elle est réécrite aussitôt, avant même la
+lecture de la configuration, sauf si elle a plus de 24 heures. Quand la
+configuration donne une nouvelle adresse, elle n'y est écrite qu'une fois
+un CTC identifié à cette adresse.
+
+Si le régulateur ne l'acquitte pas sous 3,5 s, Gladys répond qu'elle est
+enregistrée et pas encore acquittée ; s'il la refuse (exception Modbus 1, 2
+ou 3), Gladys le dit. Dans les deux cas elle est gardée et réessayée : après
+15 s, puis deux fois plus tard à chaque fois, jusqu'à 5 minutes (30 minutes
+après un refus). Une fois acquittée, elle est réécrite chaque minute.
+
+Un mode plus récent (_Chauffage_, _Auto_) la remplace une fois son écriture
+partie ; `/data` est écrit avant. Si le régulateur refuse ce mode, l'arrêt
+reste. Une commande demandée avant l'arrêt et pas encore envoyée est
+annulée.
 
 On ne sait pas si CTC garde sa protection contre le gel en mode de zone
 arrêt : vérifiez-le sur votre installation avant de vous y fier en hiver.
@@ -114,14 +150,14 @@ Elles demandent **Autoriser les commandes**. Avant chaque écriture, Gladys
 relit la version du logiciel de l'écran dans la même session Modbus et
 refuse si elle manque ou diffère de celle lue auparavant (un autre
 régulateur à cette adresse). L'écriture doit partir dans les 3,5 s qui
-suivent le clic, sinon rien n'est envoyé. Plusieurs commandes à la fois (une scène) sont écrites l'une après
-l'autre, dans l'ordre ; un clic plus récent sur la même fonctionnalité
-remplace un clic plus ancien pas encore envoyé. Une écriture acquittée par
-le régulateur est tenue ; une écriture sans réponse est signalée « envoyée,
-sans acquittement » et réécrite dans la minute ; une écriture refusée par le
-régulateur n'est pas tenue. Désactiver l'option rend tout ce qui était tenu.
-Aucune n'est réécrite après un redémarrage de l'intégration : le régulateur
-les oublie sous 5 minutes.
+suivent le clic, sinon rien n'est envoyé. Plusieurs commandes à la fois (une
+scène) sont écrites l'une après l'autre, dans l'ordre ; un clic plus récent
+sur la même fonctionnalité remplace un clic plus ancien pas encore envoyé.
+Une écriture acquittée par le régulateur est tenue ; une écriture sans
+réponse est signalée « envoyée, sans acquittement » et réécrite dans la
+minute ; une écriture refusée par le régulateur n'est pas tenue. Aucune
+n'est réécrite après un redémarrage de l'intégration : le régulateur les
+oublie sous 5 minutes.
 
 Les registres de pilotage ne se relisent pas (le manuel : écriture seule) :
 l'acquittement du régulateur est la confirmation que Gladys peut donner. Les

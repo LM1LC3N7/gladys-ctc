@@ -49,18 +49,29 @@ test/kit/                 copied from gladys-testkit (clocks, loopback TCP serve
 - **External ids are forever**: device `ext:ctc:heat-pump:ctc`, features
   named by the roles of `src/constants.js` FEATURES. A republished device
   never loses a feature.
+- getConfig is read again until it comes (5 s doubled up to 5 min).
 - Manifest keys (`address`, `allow_commands`, `poll_interval`, `language`,
   the actions `test_connection`, `release_overrides`) are frozen.
 - **Writes**: only `WRITABLE` of `src/ctc.js` (1007, 1010, 1015), refused
   in the client before anything else. Never the 615xx stored settings.
-- **Modbus**: one client, one connection, one request at a time; every
+- **Modbus**: one client, one connection, one request at a time, never a
+  pipeline (not even for the heating off); every
   answer matched to its request; silence keeps the line (late answers
   dropped by transaction id); 60 ms between transactions, 3 s after a
   connection, 10 s after a close.
 - **Heating off** (1015 = 0): never refused for the option, the identity,
-  a read in flight (cut after 1 s of silence), a busy line or /data; kept
-  in /data with its address, written at start before getConfig, every
-  minute, every 15 s until acknowledged; given back only with the option.
+  a failed round or /data; never pipelined (it waits for the request in
+  flight, then passes before the queue); kept in /data with its address,
+  written at start before getConfig (unless older than 24 h), every minute
+  once acknowledged, retried from 15 s (doubled, up to 5 min, 30 min after a
+  refusal 1/2/3); written at a new address only once a CTC is identified
+  there; given back only with the option (/data first), at the panel
+  (61542 changed) or after 24 h. A newer mode refused by the controller
+  leaves it in place.
+- **Holds end** at the panel (61542, 61509, 61500 differ from the value
+  noted after the acknowledgement; unread = nothing), after 24 h, with the
+  option off, an identity change or a refusal; shown as "program" or the
+  controller's room setting when not in force.
 - **Other commands**: `allow_commands`; identity (display software version)
   read again in the same session; sent within 3.5 s or not sent; cancelled
   by a heating off asked meanwhile; never replayed after a restart.

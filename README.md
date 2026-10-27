@@ -21,6 +21,8 @@ Never tested with a real CTC. Not affiliated with CTC.
   (EEPROM) are refused by the Modbus client itself.
 - "Heating off" works without the option, is kept in `/data` and written
   again at start; every other command needs "Allow the commands".
+- What Gladys holds ends after 24 hours, or as soon as the matching setting
+  is changed at the panel.
 - No hot water temperature is written.
 - Modbus has no password: keep the heat pump on a trusted network.
 

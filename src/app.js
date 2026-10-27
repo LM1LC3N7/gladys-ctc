@@ -9,12 +9,16 @@
 // last write, and at a restart of the controller):
 //   - a value Gladys holds is written again every minute; when no write has
 //     been acknowledged for 5 minutes, the controller has forgotten it and
-//     Gladys says so;
+//     Gladys shows what the controller follows;
+//   - what Gladys holds ends by itself: after 24 hours, or as soon as the
+//     matching setting is changed at the panel (61542 for the circuit 1
+//     mode, 61509 for the room setpoint, 61500 for the hot water mode),
+//     the panel having the last word;
 //   - "Heating off" (zone mode HC1 = Off) is the protective command: never
-//     refused for the option, an unread controller, a read in flight (cut
-//     after 1 s of silence), a busy line or a /data failure; kept in /data
-//     with its address and written again at start, before the configuration
-//     is even read, then every minute (every 15 s until acknowledged);
+//     refused for the option, an unread controller or a failed round, never
+//     behind a queued read (it waits only for the request in flight: no
+//     pipeline), never blocked by /data; kept in /data with its address and
+//     written again at start, before the configuration is even read;
 //   - everything else (another mode, the hot water mode, the room setpoint)
 //     needs "Allow the commands", is decided after a fresh read of the
 //     controller's identity in the same Modbus session, is cancelled by a
@@ -22,10 +26,10 @@
 //     restart: the controller forgets it within 5 minutes;
 //   - giving control back ("Controller's own program", or the button)
 //     writes nothing; giving back a heating off restarts the heating and
-//     needs the option.
+//     needs the option, /data written first.
 //
 // Clocks: `monotonic` for every deadline, pause and hold; `now` (wall) only
-// for the date kept in /data.
+// for the dates kept in /data and shown.
 // -----------------------------------------------------------------------------
 
 import { DEVICE_TRANSPORTS, createLogger } from '@gladysassistant/integration-sdk';
@@ -51,6 +55,8 @@ import { createFileStore } from './store.js';
  * gateway path unavailable. Any other code is ambiguous.
  */
 const REFUSALS = new Set([1, 2, 3, 6, 10]);
+/** For the heating off: a refusal that will not change by itself (spaced retries). */
+const STOP_REFUSALS = new Set([1, 2, 3]);
 
 /** Errors that end a round: the line, not a register. */
 const LINE_ERRORS = new Set([
@@ -59,6 +65,13 @@ const LINE_ERRORS = new Set([
   ERROR_KINDS.PROTOCOL,
   ERROR_KINDS.LATE,
 ]);
+
+/** The stored setting the panel changes, by command: the panel has the last word. */
+const PANEL = {
+  [F.HEATING_MODE]: F.HEATING_MODE_SETTING,
+  [F.ROOM_SETPOINT]: F.ROOM_SETTING,
+  [F.DHW_MODE]: F.DHW_MODE_SETTING,
+};
 
 /** A number sent by Gladys: a finite number, or a plain decimal text ('' and null are not 0). */
 function numberOf(value) {
@@ -70,6 +83,12 @@ function numberOf(value) {
   }
   return undefined;
 }
+
+/** A stored value compared as read: the code of an enum, the number otherwise. */
+const panelValue = (value) => (value && typeof value === 'object' ? value.code : value);
+
+/** A wall date, shown: "2026-10-27 18:04 UTC". */
+const dateText = (ms) => `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 
 const delay = (timers, ms) => new Promise((resolve) => timers.setTimeout(resolve, ms));
 
@@ -95,15 +114,22 @@ export class CtcApp {
     this.timings = timings;
     this.publisher = new StatePublisher({ gladys, logger, monotonic, timers });
     this.config = normalizeConfig();
+    this.configRead = false;
+    this.configError = undefined;
+    this.configTimer = undefined;
+    this.configTries = 0;
     this.client = undefined;
     this.generation = 0;
     this.started = false;
     this.resumed = false;
     this.storeOk = true;
+    /** The last address where a round identified a CTC (kept in /data). */
+    this.identified = undefined;
     this.lastStatus = undefined;
     this.published = undefined;
     this.badge = undefined;
     this.lastTestAt = -Infinity;
+    this.lastRoundAt = undefined;
     // The controller, as the last rounds saw it.
     this.values = undefined;
     this.identity = undefined;
@@ -119,21 +145,27 @@ export class CtcApp {
     this.running = undefined;
     this.keepTimer = undefined;
     // The control.
-    /** role -> { word, key?, value?, lastTryAt, ackedAt? } held by Gladys (not the stop). */
+    /** role -> { word, key?, value?, setAt, setWall, lastTryAt, ackedAt?, panel? } (not the stop). */
     this.holds = new Map();
-    /** The heating stop: { address, since (wall), ackedAt?, lastTryAt, writing? } */
+    /**
+     * The heating stop: { address, since (wall), sinceMono, ackedAt?, lastTryAt,
+     * nextTryAt, failures, refused?, reason?, panel?, waitIdentify, writing? }
+     */
     this.heatingStop = undefined;
     /** Moves at every heating off: what was asked before it never leaves after it. */
     this.stopSeq = 0;
     /** role -> number of its last click (commands of a feature in click order). */
     this.clicks = new Map();
+    /** The last hold given back by the panel or the time: { text, at (wall) }. */
+    this.lastEnd = undefined;
   }
 
   // --- Lifecycle -------------------------------------------------------------
 
   /**
    * At process start, before Gladys is even reached: a heating stop kept in
-   * /data is written again at once to its address (no getConfig, no read).
+   * /data is written again at once to its address (no getConfig, no read),
+   * unless it is older than the hold limit.
    */
   resume() {
     if (this.resumed) {
@@ -145,20 +177,45 @@ export class CtcApp {
     if (!ok) {
       this.logger.warn('The state file in /data cannot be read: it is left as it is');
     }
+    this.identified = addressOf(data?.identified);
     const kept = data?.stop;
-    const address =
-      kept && typeof kept.host === 'string' && Number.isInteger(kept.port)
-        ? parseAddress(`${kept.host}:${kept.port}`)
-        : undefined;
+    const address = addressOf(kept);
     if (!address) {
       return;
     }
-    const since = Number.isFinite(kept.since) && kept.since <= this.now() ? kept.since : this.now();
-    this.heatingStop = { address, since, ackedAt: undefined, lastTryAt: -Infinity };
+    const wall = this.now();
+    // A date in the future is not trusted: the stop counts from now.
+    const since = Number.isFinite(kept.since) && kept.since <= wall ? kept.since : wall;
+    if (wall - since >= this.timings.holdMax) {
+      this.logger.info('Heating off kept in /data is older than 24 hours: given back');
+      this.lastEnd = { text: HOLD_TEXTS.endedByTime(OPTION_NAMES.off), at: wall };
+      this.persist(null).catch(() => {});
+      return;
+    }
+    this.heatingStop = this.newStop(address, since);
     this.useClient(address);
-    this.logger.info(`Heating off kept in /data: written again to ${addressKey(address)}`);
+    this.logger.info(
+      `Heating off kept in /data (since ${dateText(since)}): written again to ${addressKey(address)}`,
+    );
     this.writeStop().catch(() => {});
     this.startKeepalive();
+  }
+
+  newStop(address, since = this.now()) {
+    return {
+      address,
+      since,
+      sinceMono: this.monotonic() - (this.now() - since),
+      ackedAt: undefined,
+      lastTryAt: -Infinity,
+      nextTryAt: -Infinity,
+      failures: 0,
+      refused: undefined,
+      reason: undefined,
+      panel: undefined,
+      waitIdentify: false,
+      writing: undefined,
+    };
   }
 
   /** The client of `address`, created when it changes (the old one closed). */
@@ -186,6 +243,41 @@ export class CtcApp {
     return client;
   }
 
+  /**
+   * The 'connected' event: the configuration read from Gladys, again and
+   * again when it fails (5 s, doubled up to 5 min), with the status saying
+   * so. The heating off kept in /data is written meanwhile (resume()).
+   */
+  async connectedFrom(readConfig) {
+    this.resume();
+    if (this.configTimer) {
+      this.timers.clearTimeout(this.configTimer);
+      this.configTimer = undefined;
+    }
+    let raw;
+    try {
+      raw = await readConfig();
+    } catch (err) {
+      this.configError = 'getConfig';
+      const wait = Math.min(
+        this.timings.configRetryMax,
+        this.timings.configRetry * 2 ** this.configTries,
+      );
+      this.configTries += 1;
+      this.logger.warn(
+        `The configuration could not be read (${err?.status ?? 'error'}); next try in ${Math.round(wait / 1000)} s`,
+      );
+      await this.setStatus(false, join([T.configFailed(age(wait)), ...this.notes()]));
+      this.configTimer = this.timers.setTimeout(() => {
+        this.configTimer = undefined;
+        this.connectedFrom(readConfig).catch(() => {});
+      }, wait);
+      return;
+    }
+    this.configTries = 0;
+    await this.connected(raw);
+  }
+
   async start(raw = {}) {
     this.resume();
     const running = this.running;
@@ -193,15 +285,22 @@ export class CtcApp {
     this.clearPoll();
     await running;
     this.config = normalizeConfig(raw);
+    this.configRead = true;
+    this.configError = undefined;
     const address = this.config.address;
     if (address && !sameAddress(this.client?.address, address)) {
       this.forgetController();
       if (this.heatingStop && !sameAddress(this.heatingStop.address, address)) {
-        // The stop follows the address of the configuration: the same
-        // heat pump moved, or the old address is wrong; never dropped.
-        this.logger.warn(`Heating off moved to the new address ${addressKey(address)}`);
+        // The stop follows the address of the configuration (the same heat
+        // pump renumbered, or a wrong old address), but is written there
+        // only once a round has identified a CTC at it.
+        this.logger.warn(
+          `Heating off moved to ${addressKey(address)}: written once a CTC is identified there`,
+        );
         this.heatingStop.address = address;
         this.heatingStop.ackedAt = undefined;
+        this.heatingStop.panel = undefined;
+        this.heatingStop.waitIdentify = true;
         this.persist().catch(() => {});
       }
       this.releaseSensitive('address changed');
@@ -214,7 +313,12 @@ export class CtcApp {
     this.lastStatus = undefined;
     this.publisher.start();
     this.startKeepalive();
-    if (this.heatingStop && !this.heatingStop.writing && this.heatingStop.ackedAt === undefined) {
+    if (
+      this.heatingStop &&
+      !this.heatingStop.writing &&
+      !this.heatingStop.waitIdentify &&
+      this.heatingStop.ackedAt === undefined
+    ) {
       this.writeStop().catch(() => {});
     }
     if (!address) {
@@ -244,6 +348,10 @@ export class CtcApp {
       this.timers.clearInterval(this.keepTimer);
       this.keepTimer = undefined;
     }
+    if (this.configTimer) {
+      this.timers.clearTimeout(this.configTimer);
+      this.configTimer = undefined;
+    }
     this.client?.close();
     this.publisher.stop();
     await this.publisher.flush().catch(() => {});
@@ -257,9 +365,10 @@ export class CtcApp {
   }
 
   /**
-   * Connected to Gladys. The first time, start; after a reconnection (Gladys
-   * restarted), resend what Gladys keeps in memory only (status, Discovery
-   * list, badges) and the last states. The client, the holds and the stop stay.
+   * Connected to Gladys with its configuration. The first time, start;
+   * after a reconnection (Gladys restarted), resend what Gladys keeps in
+   * memory only (status, Discovery list, badges) and the last states. The
+   * client, the holds and the stop stay.
    */
   async connected(raw = {}) {
     if (!this.started) {
@@ -282,6 +391,7 @@ export class CtcApp {
   needsRestart(raw) {
     const next = normalizeConfig(raw);
     return (
+      !this.configRead ||
       next.pollInterval !== this.config.pollInterval ||
       !sameAddress(next.address, this.config.address) ||
       next.invalid !== this.config.invalid
@@ -291,6 +401,7 @@ export class CtcApp {
   applyConfig(raw) {
     const previous = this.config;
     this.config = normalizeConfig(raw);
+    this.configRead = true;
     if (previous.allowCommands && !this.config.allowCommands) {
       this.logger.info('Commands disabled: what Gladys held is given back');
       this.releaseSensitive('commands disabled');
@@ -301,6 +412,7 @@ export class CtcApp {
   /** A new address or interval restarts; the option and the language apply at once. */
   async configUpdated(raw = {}) {
     if (this.needsRestart(raw)) {
+      this.started = true;
       await this.start(raw);
       return;
     }
@@ -378,10 +490,6 @@ export class CtcApp {
         if (generation !== this.generation) {
           return;
         }
-        if (err.kind === ERROR_KINDS.CUT) {
-          // Given up for a heating stop: neither a failure nor a silence.
-          continue;
-        }
         if (LINE_ERRORS.has(err.kind) || !err.kind) {
           failure = err;
           break;
@@ -403,11 +511,16 @@ export class CtcApp {
     if (!failure && answered.length === 0) {
       failure = { reason: 'no answer' };
     }
+    const identity = identityOf(raw.get(IDENTITY.start), raw.get(IDENTITY.start + 1));
+    if (!failure && !identity) {
+      // Something answers, but not with a CTC display software version.
+      failure = { reason: 'not identified as a CTC' };
+    }
     if (failure) {
       this.failed(failure);
     } else {
       this.learnMissing(answered, unanswered);
-      this.succeeded(raw);
+      this.succeeded(raw, identity, startedAt);
     }
     await this.publishAll();
     if (generation === this.generation) {
@@ -430,17 +543,14 @@ export class CtcApp {
     }
   }
 
-  succeeded(raw) {
+  succeeded(raw, identity, startedAt) {
     const values = decode(raw);
-    const identity = identityOf(raw.get(IDENTITY.start), raw.get(IDENTITY.start + 1));
-    if (identity && this.identity && identity !== this.identity) {
+    if (this.identity && identity !== this.identity) {
       this.logger.warn('CTC: the display software version changed; what Gladys held is given back');
       this.releaseSensitive('identity changed');
       this.identityChanged = true;
     }
-    if (identity) {
-      this.identity = identity;
-    }
+    this.identity = identity;
     this.values = values;
     for (const role of reportedRoles(values)) {
       this.seen.add(role);
@@ -449,6 +559,16 @@ export class CtcApp {
     this.failures = 0;
     this.wait = undefined;
     this.error = undefined;
+    if (!sameAddress(this.identified, this.config.address)) {
+      this.identified = this.config.address;
+      this.persist().catch(() => {});
+    }
+    const stop = this.heatingStop;
+    if (stop?.waitIdentify && sameAddress(stop.address, this.config.address)) {
+      stop.waitIdentify = false;
+      this.writeStop().catch(() => {});
+    }
+    this.watchPanel(startedAt);
   }
 
   failed(err) {
@@ -469,7 +589,63 @@ export class CtcApp {
   }
 
   get live() {
-    return Boolean(this.online === true && this.values);
+    return Boolean(this.online === true && this.values && this.identity);
+  }
+
+  // --- The panel and the time end what Gladys holds ----------------------------
+
+  /**
+   * The stored setting matching each hold, noted at the first round started
+   * after the hold was acknowledged; a different value read later means it
+   * was changed at the panel: the hold is given back. A value missing or
+   * not read never gives anything back.
+   */
+  watchPanel(startedAt) {
+    const entries = [...this.holds].map(([role, entry]) => [role, entry]);
+    if (this.heatingStop) {
+      entries.push([F.HEATING_MODE, this.heatingStop]);
+    }
+    for (const [role, entry] of entries) {
+      if (entry.ackedAt === undefined || entry.ackedAt >= startedAt) {
+        continue;
+      }
+      const value = panelValue(this.values?.[PANEL[role]]);
+      if (value === undefined) {
+        continue;
+      }
+      if (entry.panel === undefined) {
+        entry.panel = value;
+        continue;
+      }
+      if (value !== entry.panel) {
+        this.endHold(role, entry, 'panel');
+      }
+    }
+  }
+
+  /** A hold given back by the panel or the time: logged, said in the status and the text. */
+  endHold(role, entry, why) {
+    const name = this.holdName(role, entry);
+    const text = why === 'panel' ? HOLD_TEXTS.endedByPanel(name) : HOLD_TEXTS.endedByTime(name);
+    this.lastEnd = { text, at: this.now() };
+    this.logger.info(
+      `CTC ${role}: given back (${why === 'panel' ? 'changed at the panel' : '24 h'})`,
+    );
+    if (entry === this.heatingStop) {
+      this.heatingStop = undefined;
+      this.persist().catch(() => {});
+    } else if (this.holds.get(role) === entry) {
+      this.holds.delete(role);
+    }
+  }
+
+  holdName(role, entry) {
+    if (entry === this.heatingStop) {
+      return OPTION_NAMES.off;
+    }
+    return role === F.ROOM_SETPOINT
+      ? HOLD_TEXTS.roomSetpoint(entry.value)
+      : OPTION_NAMES[entry.key];
   }
 
   // --- The control -----------------------------------------------------------
@@ -479,15 +655,18 @@ export class CtcApp {
     return entry?.ackedAt !== undefined && mono - entry.ackedAt < this.timings.expiry;
   }
 
-  /** What the three commands show: what Gladys holds in force, or the controller's own. */
+  /**
+   * What the three commands show: what Gladys holds in force, else what
+   * the controller follows (its own program, its own room setting).
+   */
   controls(mono = this.monotonic()) {
     const heating = this.holds.get(F.HEATING_MODE);
     const dhw = this.holds.get(F.DHW_MODE);
     const room = this.holds.get(F.ROOM_SETPOINT);
     let heatingKey = 'program';
-    if (this.heatingStop) {
-      heatingKey = this.inForce(this.heatingStop, mono) ? 'off' : undefined;
-    } else if (this.inForce(heating, mono)) {
+    if (this.inForce(this.heatingStop, mono)) {
+      heatingKey = 'off';
+    } else if (!this.heatingStop && this.inForce(heating, mono)) {
       heatingKey = heating.key;
     }
     return {
@@ -497,28 +676,50 @@ export class CtcApp {
     };
   }
 
+  /** The state of the heating stop: 'inForce', 'refused', 'waiting', 'pending' or 'lapsed'. */
+  stopState(mono = this.monotonic()) {
+    const stop = this.heatingStop;
+    if (!stop) {
+      return undefined;
+    }
+    if (this.inForce(stop, mono)) {
+      return 'inForce';
+    }
+    if (stop.refused !== undefined) {
+      return 'refused';
+    }
+    if (stop.waitIdentify) {
+      return 'waiting';
+    }
+    return stop.ackedAt === undefined ? 'pending' : 'lapsed';
+  }
+
+  /** "Control held by Gladys": what is held, since when; it changes only with the holds. */
   holdText(mono = this.monotonic()) {
     const parts = [];
     const stop = this.heatingStop;
-    if (stop) {
-      if (this.inForce(stop, mono)) {
-        parts.push(HOLD_TEXTS.inForce(OPTION_NAMES.off, age(mono - stop.ackedAt)));
-      } else if (stop.ackedAt === undefined) {
-        parts.push(HOLD_TEXTS.stopPending);
-      } else {
-        parts.push(HOLD_TEXTS.stopLapsed(age(mono - stop.ackedAt)));
-      }
+    const state = this.stopState(mono);
+    if (state === 'inForce') {
+      parts.push(HOLD_TEXTS.since(OPTION_NAMES.off, dateText(stop.since)));
+    } else if (state === 'refused') {
+      parts.push(HOLD_TEXTS.stopRefused(stop.refused));
+    } else if (state === 'waiting') {
+      parts.push(HOLD_TEXTS.stopWaiting);
+    } else if (state === 'pending') {
+      parts.push(HOLD_TEXTS.stopPending);
+    } else if (state === 'lapsed') {
+      parts.push(HOLD_TEXTS.stopLapsed(dateText(this.now() - (mono - stop.ackedAt))));
     }
     for (const [role, entry] of this.holds) {
-      if (!this.inForce(entry, mono)) {
-        continue;
+      if (this.inForce(entry, mono)) {
+        parts.push(HOLD_TEXTS.since(this.holdName(role, entry), dateText(entry.setWall)));
       }
-      const name =
-        role === F.ROOM_SETPOINT ? HOLD_TEXTS.roomSetpoint(entry.value) : OPTION_NAMES[entry.key];
-      parts.push(HOLD_TEXTS.inForce(name, age(mono - entry.ackedAt)));
     }
     if (parts.length === 0) {
-      return HOLD_TEXTS.none;
+      parts.push(HOLD_TEXTS.none);
+      if (this.lastEnd) {
+        parts.push(this.lastEnd.text);
+      }
     }
     return { en: parts.map((p) => p.en).join(' · '), fr: parts.map((p) => p.fr).join(' · ') };
   }
@@ -531,15 +732,15 @@ export class CtcApp {
     }
   }
 
-  /** The /data state: the heating stop and its address, nothing else. */
-  persist() {
-    const stop = this.heatingStop;
-    const data = stop
-      ? {
-          version: 1,
-          stop: { host: stop.address.host, port: stop.address.port, since: stop.since },
-        }
-      : { version: 1 };
+  /** /data: the heating stop and its address, and the last address identified as a CTC. */
+  persist(stop = this.heatingStop) {
+    const data = { version: 1 };
+    if (this.identified) {
+      data.identified = { host: this.identified.host, port: this.identified.port };
+    }
+    if (stop) {
+      data.stop = { host: stop.address.host, port: stop.address.port, since: stop.since };
+    }
     return this.store.save(data).then(
       () => {
         this.storeOk = true;
@@ -561,20 +762,27 @@ export class CtcApp {
     }, this.timings.stopRetry);
   }
 
-  /** Every 15 s: the stop when due, then each held value written a minute ago or more. */
+  /** Every 15 s: the 24 h limit, the stop when due, then each held value written a minute ago. */
   async keepalive() {
     const mono = this.monotonic();
     const stop = this.heatingStop;
-    if (stop && !stop.writing) {
-      const acked = stop.ackedAt !== undefined && mono - stop.ackedAt < this.timings.keepalive;
-      if (!acked && mono - stop.lastTryAt >= this.timings.stopRetry - 1) {
-        await this.writeStop().catch(() => {});
-      } else if (stop.ackedAt !== undefined && mono - stop.ackedAt >= this.timings.keepalive) {
+    if (stop && mono - stop.sinceMono >= this.timings.holdMax) {
+      this.endHold(F.HEATING_MODE, stop, 'time');
+    } else if (stop && !stop.writing && !stop.waitIdentify) {
+      const due =
+        stop.ackedAt === undefined || stop.refused !== undefined
+          ? mono >= stop.nextTryAt
+          : mono - stop.ackedAt >= this.timings.keepalive;
+      if (due) {
         await this.writeStop().catch(() => {});
       }
     }
     for (const [role, entry] of [...this.holds]) {
       const now = this.monotonic();
+      if (now - entry.setAt >= this.timings.holdMax) {
+        this.endHold(role, entry, 'time');
+        continue;
+      }
       const since = entry.ackedAt ?? entry.setAt;
       if (now - since >= this.timings.expiry) {
         // The controller has forgotten it: never taken up again by itself.
@@ -659,20 +867,21 @@ export class CtcApp {
   }
 
   /**
-   * Writes the heating stop now, ahead of everything (a read in flight is
-   * cut after 1 s of silence). One write at a time; a failure that sent
-   * nothing is tried again within the ack budget.
+   * Writes the heating stop, before everything queued; it waits only for
+   * the request in flight (never a pipeline). Its answer is awaited 5 s
+   * after it left. One write at a time; a failure that sent nothing is
+   * tried again within the ack budget. Returns the outcome:
+   * 'acked' | 'refused' | 'failed'.
    */
   writeStop() {
     const stop = this.heatingStop;
     if (!stop) {
-      return Promise.resolve(false);
+      return Promise.resolve('none');
     }
     if (stop.writing) {
       return stop.writing;
     }
-    const client = this.client;
-    if (!client || !sameAddress(client.address, stop.address)) {
+    if (!this.client || !sameAddress(this.client.address, stop.address)) {
       this.useClient(stop.address);
     }
     const budgetEnd = this.monotonic() + this.timings.stopAckBy - 250;
@@ -680,28 +889,41 @@ export class CtcApp {
       for (;;) {
         stop.lastTryAt = this.monotonic();
         try {
-          await this.client.session(
-            (raw) =>
-              raw.writeRegister(STOP.address, STOP.word, {
-                answerBy:
-                  this.monotonic() +
-                  this.timings.closeSettle +
-                  this.timings.connectDelay +
-                  this.timings.connectTimeout +
-                  this.timings.readTimeout,
-              }),
+          const written = await this.client.session(
+            (raw) => {
+              if (this.heatingStop !== stop) {
+                // Given back or replaced while waiting for the line.
+                return false;
+              }
+              return raw
+                .writeRegister(STOP.address, STOP.word, {
+                  answerBy:
+                    this.monotonic() +
+                    this.timings.closeSettle +
+                    this.timings.connectDelay +
+                    this.timings.connectTimeout +
+                    this.timings.stopAnswerWithin,
+                  answerWithin: this.timings.stopAnswerWithin,
+                })
+                .then(() => true);
+            },
             { level: LEVEL.STOP },
           );
+          if (!written) {
+            return 'none';
+          }
           if (this.heatingStop === stop) {
+            this.stopOutcome(stop, undefined);
             stop.ackedAt = this.monotonic();
           }
-          return true;
+          return 'acked';
         } catch (err) {
           const again =
             !err.sent && this.monotonic() + 250 < budgetEnd && this.heatingStop === stop;
-          this.logger.warn(`CTC heating off: not acknowledged (${errorReason(err)})`);
           if (!again) {
-            throw err;
+            this.stopOutcome(stop, err);
+            const refused = err.kind === ERROR_KINDS.EXCEPTION && STOP_REFUSALS.has(err.code);
+            return refused ? 'refused' : 'failed';
           }
           await delay(this.timers, 250);
         }
@@ -710,6 +932,36 @@ export class CtcApp {
       stop.writing = undefined;
     });
     return stop.writing;
+  }
+
+  /** The outcome of a stop write: the next try (spaced), one log line per change of reason. */
+  stopOutcome(stop, err) {
+    const refused =
+      err?.kind === ERROR_KINDS.EXCEPTION && STOP_REFUSALS.has(err.code) ? err.code : undefined;
+    const reason = err ? errorReason(err) : undefined;
+    if (reason !== stop.reason) {
+      if (reason) {
+        this.logger.warn(
+          refused !== undefined
+            ? `CTC heating off: refused by the controller (${reason}); tried again, spaced`
+            : `CTC heating off: not acknowledged (${reason}); tried again`,
+        );
+      } else if (stop.reason) {
+        this.logger.info('CTC heating off: acknowledged');
+      }
+    }
+    stop.reason = reason;
+    stop.refused = refused;
+    if (!err) {
+      stop.failures = 0;
+      stop.nextTryAt = -Infinity;
+      return;
+    }
+    stop.failures += 1;
+    const max =
+      refused !== undefined ? this.timings.stopRefusedRetryMax : this.timings.stopRetryMax;
+    stop.nextTryAt =
+      this.monotonic() + Math.min(max, this.timings.stopRetry * 2 ** (stop.failures - 1)) - 1;
   }
 
   // --- The commands ------------------------------------------------------------
@@ -759,6 +1011,9 @@ export class CtcApp {
     if (role === F.HEATING_MODE && wanted.key === STOP.key) {
       return this.heatingOff(received);
     }
+    if (!this.configRead) {
+      throw this.refusal(ERRORS.configNotRead);
+    }
     if (!this.config.allowCommands) {
       throw this.refusal(ERRORS.disabled);
     }
@@ -776,59 +1031,72 @@ export class CtcApp {
     return wanted.release ? this.release(role) : this.command(role, wanted, received, order);
   }
 
+  /** Waits (within `by`) for the configuration, when it has not been read yet. */
+  async configBy(by) {
+    while (!this.configRead && this.monotonic() < by) {
+      await delay(this.timers, 100);
+    }
+  }
+
   /**
    * "Heating off": never refused for the option, an unread controller, a
-   * read in flight or /data. Recorded, kept in /data (not awaited), written
-   * ahead of everything; the ack waits 3.5 s at most for the controller.
+   * request in flight or /data. Recorded, kept in /data (not awaited),
+   * written before everything queued; the ack waits 3.5 s at most.
    */
   async heatingOff(received) {
-    const address = this.config.address ?? this.heatingStop?.address;
+    const ackBy = received + this.timings.stopAckBy;
+    if (!this.configRead && !this.heatingStop) {
+      // Before the configuration: its address if it comes in time, else the
+      // last address identified as a CTC.
+      await this.configBy(ackBy - 1000);
+    }
+    const address = this.configRead
+      ? (this.config.address ?? this.heatingStop?.address)
+      : (this.heatingStop?.address ?? this.identified);
     if (!address) {
-      throw this.refusal(ERRORS.noAddress);
+      throw this.refusal(this.configRead ? ERRORS.noAddress : ERRORS.configNotRead);
     }
     this.stopSeq += 1;
     // A heating mode held (heat, auto) is replaced: never written again.
     this.holds.delete(F.HEATING_MODE);
     if (!this.heatingStop) {
-      this.heatingStop = {
-        address,
-        since: this.now(),
-        ackedAt: undefined,
-        lastTryAt: -Infinity,
-      };
+      this.heatingStop = this.newStop(address);
       this.logger.info(`CTC: heating off asked (${addressKey(address)})`);
+    } else {
+      // A new click: tried at once, whatever the spacing of the retries.
+      this.heatingStop.nextTryAt = -Infinity;
+      this.heatingStop.waitIdentify = false;
     }
     this.persist().catch(() => {});
     this.startKeepalive();
-    const writing = this.writeStop().then(
-      () => true,
-      () => false,
-    );
+    const writing = this.writeStop().catch(() => 'failed');
     let timer;
     const late = new Promise((resolve) => {
-      timer = this.timers.setTimeout(
-        () => resolve(false),
-        Math.max(0, received + this.timings.stopAckBy - this.monotonic()),
-      );
+      timer = this.timers.setTimeout(() => resolve('late'), Math.max(0, ackBy - this.monotonic()));
     });
-    const acked = await Promise.race([writing, late]);
+    const outcome = await Promise.race([writing, late]);
     this.timers.clearTimeout(timer);
     this.publishAll().catch(() => {});
-    if (!acked) {
-      throw this.refusal(ERRORS.stopNotYet);
+    if (outcome === 'acked') {
+      return;
     }
+    if (outcome === 'refused') {
+      throw this.refusal(ERRORS.stopRefused(this.heatingStop?.refused));
+    }
+    throw this.refusal(ERRORS.stopNotYet);
   }
 
   /** "Controller's own program": nothing written; a stop given back needs /data first. */
   async release(role) {
     if (role === F.HEATING_MODE && this.heatingStop) {
       const stop = this.heatingStop;
-      this.heatingStop = undefined;
       try {
-        await this.persist();
+        await this.persist(null);
       } catch {
-        this.heatingStop = stop;
         throw this.refusal(ERRORS.storeFailed);
+      }
+      if (this.heatingStop === stop) {
+        this.heatingStop = undefined;
       }
       this.logger.info('CTC: heating off given back to the controller');
     }
@@ -840,9 +1108,7 @@ export class CtcApp {
   async releaseOverrides() {
     const names = [];
     for (const [role, entry] of this.holds) {
-      names.push(
-        role === F.ROOM_SETPOINT ? HOLD_TEXTS.roomSetpoint(entry.value) : OPTION_NAMES[entry.key],
-      );
+      names.push(this.holdName(role, entry));
     }
     this.holds.clear();
     const notes = [];
@@ -896,6 +1162,8 @@ export class CtcApp {
     );
     this.checkBeforeSend(generation, seq, role, order);
     let left = false;
+    /** The heating stop a newer mode replaces once it has left. */
+    let replaced;
     try {
       await client.session(
         async (raw) => {
@@ -915,6 +1183,19 @@ export class CtcApp {
             );
           }
           this.checkBeforeSend(generation, seq, role, order);
+          if (role === F.HEATING_MODE && this.heatingStop) {
+            // /data without the stop BEFORE the bytes leave: a restart
+            // never replays a stop the user has replaced. Restored below
+            // if the mode does not leave or is refused.
+            replaced = this.heatingStop;
+            try {
+              await this.persist(null);
+            } catch {
+              replaced = undefined;
+              throw this.refusal(ERRORS.storeFailed);
+            }
+            this.checkBeforeSend(generation, seq, role, order);
+          }
           await raw.writeRegister(CONTROLS[role].address, wanted.word, {
             startBy: sendBy,
             answerBy: received + this.timings.commandAnswerBy,
@@ -922,18 +1203,20 @@ export class CtcApp {
               this.checkBeforeSend(generation, seq, role, order);
               left = true;
               this.logger.info(`CTC ${role}: ${wanted.key ?? wanted.value}`);
-              if (role === F.HEATING_MODE && this.heatingStop) {
-                // The newer mode leaves now: the stop is not written again.
-                this.heatingStop = undefined;
-                this.persist().catch(() => {});
-                this.logger.info('CTC: heating off replaced by a newer mode');
-              }
             },
           });
         },
         { level: LEVEL.COMMAND, startBy: readBy - this.timings.commandMinRead },
       );
     } catch (err) {
+      const refused = left && err.kind === ERROR_KINDS.EXCEPTION && REFUSALS.has(err.code);
+      if (replaced && (!left || refused)) {
+        // The newer mode did not leave, or the controller refused it: the
+        // stop stays, as it was, and /data gets it back.
+        await this.persist(replaced).catch(() => {});
+      } else if (replaced && this.heatingStop === replaced) {
+        this.dropStop('replaced by a newer mode');
+      }
       if (!left) {
         // Nothing left: our own refusals as they are, the line in our words.
         if (err.kind === ERROR_KINDS.LATE) {
@@ -944,8 +1227,7 @@ export class CtcApp {
         }
         throw err;
       }
-      // The bytes may have left.
-      if (err.kind === ERROR_KINDS.EXCEPTION && REFUSALS.has(err.code)) {
+      if (refused) {
         throw this.refusal(ERRORS.refused(errorReason(err)));
       }
       // Kept, not acknowledged: written again by the keepalive (counted
@@ -954,11 +1236,19 @@ export class CtcApp {
       this.publishAll().catch(() => {});
       throw this.refusal(ERRORS.sentUnconfirmed(errorReason(err)));
     }
+    if (replaced && this.heatingStop === replaced) {
+      this.dropStop('replaced by a newer mode');
+    }
     this.hold(role, wanted, this.monotonic(), order, seq);
     this.publishAll().catch(() => {});
   }
 
-  /** A value now held by Gladys, unless a newer click of the feature came meanwhile. */
+  dropStop(why) {
+    this.heatingStop = undefined;
+    this.logger.info(`CTC: heating off ${why}`);
+  }
+
+  /** A value now held by Gladys, unless a newer click of the feature or a stop came meanwhile. */
   hold(role, wanted, ackedAt, order, seq) {
     if (this.clicks.get(role) !== order || seq !== this.stopSeq) {
       // A newer click of this feature, or a heating off, came meanwhile:
@@ -971,8 +1261,10 @@ export class CtcApp {
       key: wanted.key,
       value: wanted.value,
       setAt: mono,
+      setWall: this.now(),
       lastTryAt: mono,
       ackedAt,
+      panel: undefined,
     });
     this.startKeepalive();
   }
@@ -998,10 +1290,10 @@ export class CtcApp {
       .catch((err) => this.logger.warn(`Sending to Gladys failed: ${err.message}`));
   }
 
-  /** The Discovery list: the controller once read, or the device already created. */
+  /** The Discovery list: the controller once identified, or the device already created. */
   async publishDevice() {
     const created = this.createdDevice();
-    if (!this.identity && !this.live && !created) {
+    if (!this.identity && !created) {
       return;
     }
     const device = buildDevice(this.gladys, {
@@ -1071,14 +1363,25 @@ export class CtcApp {
   }
 
   async updateStatus() {
+    if (!this.configRead && this.configError) {
+      return;
+    }
     const [connected, message] = this.status();
     await this.setStatus(connected, message);
   }
 
   notes() {
     const notes = [];
-    if (this.heatingStop) {
-      notes.push(this.inForce(this.heatingStop) ? T.notes.stop : T.notes.stopPending);
+    const state = this.stopState();
+    if (state) {
+      notes.push(
+        state === 'refused'
+          ? T.notes.stopRefused(this.heatingStop.refused)
+          : T.notes[`stop_${state}`],
+      );
+    }
+    if (this.lastEnd) {
+      notes.push(this.lastEnd.text);
     }
     if (!this.storeOk) {
       notes.push(T.notes.store);
@@ -1109,9 +1412,9 @@ export class CtcApp {
       ];
     }
     if (!this.live) {
-      return [false, T.connecting];
+      return [false, join([T.connecting, ...this.notes()])];
     }
-    return [true, T.connected(this.identity ?? '?', this.notes())];
+    return [true, T.connected(this.identity, this.notes())];
   }
 
   /** A device was created (or updated): send its current values at once. */
@@ -1166,4 +1469,11 @@ export class CtcApp {
     }
     await this.tick();
   }
+}
+
+/** An address kept in /data, checked again. */
+function addressOf(kept) {
+  return kept && typeof kept.host === 'string' && Number.isInteger(kept.port)
+    ? parseAddress(`${kept.host}:${kept.port}`)
+    : undefined;
 }

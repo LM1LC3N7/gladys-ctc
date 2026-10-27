@@ -76,29 +76,67 @@ Three commands:
   settings: Gladys writes no hot water temperature.
 - **Room setpoint, circuit 1**: 10 to 30 °C, in tenths of a degree.
 
-The feature **Control held by Gladys** says what is held and when it was
-last acknowledged.
+When nothing is in force (nothing held, or a hold the controller no longer
+acknowledges), the commands show what the controller follows: its own
+program, its own room setting. The feature **Control held by Gladys** says
+what is held and since when, what is asked but not in force, and the last
+hold that ended.
+
+### How a hold ends
+
+What Gladys holds (the heating off included) ends:
+
+- **at the panel**: change the matching setting on the display (heating
+  mode of circuit 1 for the circuit mode and the heating off, room setting
+  of circuit 1, hot water mode). Gladys notes these settings after the
+  controller acknowledged its value and gives the hold back as soon as one
+  of them changes (a setting it cannot read gives nothing back);
+- **after 24 hours**, by itself;
+- with _Controller's own program_ or the button **Give control back to the
+  heat pump** (for the heating off: only with "Allow the commands");
+- when "Allow the commands" is turned off (not the heating off), when the
+  display software version changes, or when the controller refuses a value
+  (not the heating off);
+- in the last resort, by setting Ethernet back to anything but Modbus TCP
+  on the display, or stopping the integration: the controller forgets
+  within 5 minutes.
+
+Whether the panel or the 1000 block wins while Gladys holds a value is not
+known (never tested with a real CTC).
 
 ### Heating off
 
 _Heating off_ (zone mode of circuit 1 = Off) is the protective command. It
 works **even when "Allow the commands" is off**, while the controller has
-not been read yet, while a read is in flight (a read silent for 1 s is cut),
-and when `/data` cannot be written. It is refused only when no controller
-address is known (none in the configuration and none kept in `/data`), or
-for a value that is not exactly an option of the list.
+not been read yet, after a failed round and when `/data` cannot be written.
+It never waits behind the queued reads: it waits only for the Modbus
+request in flight to end (its answer, or 5 s of silence: CTC answers one
+request at a time), then leaves first.
 
-It is kept in `/data` with its address: after a restart of the integration
-it is written again at once, before the configuration is even read. It is
-written again every minute, and every 15 s while the controller has not
-acknowledged it. When the controller does not acknowledge it within 3.5 s,
-Gladys answers that it is recorded and not yet acknowledged.
+It is refused only when no controller address is known: none in the
+configuration and none kept in `/data` (the address of the stop, or the
+last address where a CTC was identified). Before the configuration has
+been read from Gladys (it is read again every 5 s, doubled up to 5
+minutes, while Gladys does not answer), it waits for it up to 2.5 s, then
+uses the address kept in `/data`.
 
-It stays until it is given back: by choosing _Controller's own program_,
-_Heating_ or _Auto_ (this restarts the heating, so it needs "Allow the
-commands"), or with the **Give control back to the heat pump** button
-(the same). A newer mode replaces it only once its write has left; a
-command asked before the heating off and not sent yet is cancelled.
+It is kept in `/data` with its address and its date: after a restart of
+the integration it is written again at once, before the configuration is
+even read, unless it is older than 24 hours. When the configuration gives
+a new address, it is written there only once a round has identified a CTC
+at that address.
+
+When the controller does not acknowledge it within 3.5 s, Gladys answers
+that it is recorded and not yet acknowledged; when the controller refuses
+it (Modbus exception 1, 2 or 3), Gladys says so. In both cases it is kept
+and tried again: after 15 s, then twice as long each time, up to 5 minutes
+(30 minutes after a refusal). Once acknowledged, it is written again every
+minute.
+
+A newer mode (_Heating_, _Auto_) replaces it once its write has left;
+`/data` is written before that. If the controller refuses the newer mode,
+the heating off stays. A command asked before the heating off and not
+sent yet is cancelled.
 
 Whether CTC keeps its frost protection with the zone mode Off is not known:
 check it on your installation before relying on it in winter.
@@ -113,9 +151,9 @@ Several commands at once (a scene) are written one after the other, in
 order; a newer click of the same feature replaces an older one not sent
 yet. A write the controller acknowledges is held; one without an answer is
 reported "sent, without acknowledgement" and written again within the
-minute; a write refused by the controller is not held. Turning the option
-off gives every held value back. None of them is written again after a
-restart of the integration: the controller forgets them within 5 minutes.
+minute; a write refused by the controller is not held. None of them is
+written again after a restart of the integration: the controller forgets
+them within 5 minutes.
 
 The control registers cannot be read back (the manual: write only): the
 acknowledgement of the controller is the confirmation Gladys can give. The
