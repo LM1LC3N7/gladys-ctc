@@ -1,67 +1,135 @@
-# Template de démonstration
+# Pompes à chaleur CTC dans Gladys
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Cette intégration affiche une pompe à chaleur CTC (EcoZenith i255, i360 ou
+i550, EcoHeat, EcoPart, et l'EcoAir qu'ils pilotent) dans Gladys, par
+l'interface **Modbus TCP** de son écran, sur votre réseau local, sans cloud.
 
-## Ce que vous obtenez
+Jamais testé avec un vrai CTC : elle suit le manuel BMS de CTC (162 600 16-3,
+2026-02-02) et l'intégration HA-CTC-Local-Easyconf pour Home Assistant, qui
+tourne sur de vraies installations. Sans lien avec CTC.
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+## Avant de commencer
+
+1. Un écran à **3 ports** (le manuel : seuls ceux-là parlent Modbus en TCP/IP).
+2. Sur l'écran : **Installateur** (Avancé), **Définir**, **Commande à
+   distance**, réglez **Ethernet** sur **Modbus TCP**. Ce réglage exclurait
+   la connexion au cloud myUplink.
+3. Donnez à l'écran une adresse fixe dans votre routeur.
+4. Le régulateur ne sert **qu'un client Modbus** à la fois : retirez tout
+   autre client (Home Assistant, un script), sinon les deux échouent.
+5. Modbus n'a pas de mot de passe : qui atteint le port 502 peut lire les
+   registres et écrire ceux de pilotage. Gardez la pompe à chaleur sur un
+   **réseau de confiance** (un VLAN, ou une règle de pare-feu qui ne laisse
+   passer que Gladys), et n'ouvrez pas le port 502 sur internet.
 
 ## Configuration
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+| Champ                          | Rôle                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| Adresse IP de l'écran CTC      | Une adresse IPv4 ou un nom d'hôte, port 502 sauf si vous en ajoutez un (`192.168.1.80:5020`). |
+| Autoriser les commandes        | Désactivé par défaut. Voir « Pilotage » plus bas.                                             |
+| Intervalle de rafraîchissement | 30 s par défaut, de 10 à 600 s.                                                               |
+| Langue                         | Noms de l'appareil et des fonctionnalités ajoutés désormais, textes des états, erreurs.       |
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+Enregistrez, puis ajoutez la pompe à chaleur depuis l'onglet **Découverte**.
 
-## Actions
+Le bouton **Tester la connexion** lit le régulateur, au plus une fois par
+intervalle de rafraîchissement, et affiche son état.
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+## Ce que vous obtenez
 
-## Scènes
+Températures (extérieure, départ et sa consigne, retour, eau des radiateurs,
+entrée et sortie de la pompe à chaleur, gaz de refoulement et d'aspiration,
+eau glycolée, eau chaude haut et bas, pièce 1 et 2), haute et basse
+pression, vitesse du compresseur, pompe de charge, pompe d'eau glycolée et
+ventilateur (%), degrés-minutes, puissance de la résistance, courants des
+phases, capacité d'eau chaude, temps de fonctionnement du compresseur et ses
+dernières 24 h, compteurs d'énergie de la résistance et du compresseur (kWh,
+valeurs simples), états du système, de la pompe à chaleur, du circuit 1 et
+du SmartGrid, et en lecture seule le mode d'eau chaude, le réglage de la
+pièce et le mode de chauffage du circuit 1 mémorisés. Compresseur en marche,
+dégivrage et « arrêtée par une alarme » viennent de l'état de la pompe à
+chaleur.
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+Une valeur apparaît dès que son registre a répondu par un nombre. CTC répond
+« pas de sonde » par des marqueurs (9999, 32767...) et se tait pour un
+registre que le modèle n'a pas : un tel bloc est ignoré après trois lectures
+muettes, jusqu'au redémarrage de l'intégration, et l'écran de configuration
+le signale.
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+Les compteurs d'énergie sont des valeurs simples, pas un index d'énergie :
+rien ne prouve encore qu'ils ne reculent ni ne sautent.
 
-## Tableau de bord
+## Pilotage
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
+Gladys n'écrit que dans les **registres de pilotage volatils** de CTC (le
+bloc 1000), pas dans les réglages mémorisés, dont la mémoire supporte un
+nombre limité d'écritures ; le code refuse toute autre adresse avant
+d'envoyer quoi que ce soit. Le régulateur oublie une valeur de pilotage **5
+minutes** après la dernière écriture et à son propre redémarrage : Gladys
+réécrit donc ce qu'elle tient chaque minute. Si l'intégration s'arrête, la
+pompe à chaleur reprend ses propres réglages sous 5 minutes.
 
-## Dépannage
+Trois commandes :
 
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+- **Mode du circuit 1** : _Programme du régulateur_ (rend la main, n'écrit
+  rien), _Chauffage arrêté_, _Chauffage_, _Auto_.
+- **Mode de l'eau chaude** : _Programme du régulateur_, _Économie_,
+  _Normal_, _Confort_. Les températures de ces modes sont les réglages du
+  régulateur : Gladys n'écrit aucune température d'eau chaude.
+- **Consigne de la pièce, circuit 1** : 10 à 30 °C, au dixième de degré.
+
+La fonctionnalité **Pilotage tenu par Gladys** dit ce qui est tenu et quand
+le régulateur l'a acquitté pour la dernière fois.
+
+### Chauffage arrêté
+
+_Chauffage arrêté_ (mode de zone du circuit 1 = arrêt) est la commande
+protectrice. Elle fonctionne **même si « Autoriser les commandes » est
+désactivé**, tant que le régulateur n'a pas encore été lu, pendant une
+lecture (une lecture muette depuis 1 s est coupée), et quand `/data` ne peut
+être écrit. Elle n'est refusée que si aucune adresse de régulateur n'est
+connue (ni dans la configuration ni gardée dans `/data`), ou pour une valeur
+qui n'est pas exactement une option de la liste.
+
+Elle est gardée dans `/data` avec son adresse : après un redémarrage de
+l'intégration, elle est réécrite aussitôt, avant même la lecture de la
+configuration. Elle est réécrite chaque minute, et toutes les 15 s tant que
+le régulateur ne l'a pas acquittée. Si le régulateur ne l'acquitte pas sous
+3,5 s, Gladys répond qu'elle est enregistrée et pas encore acquittée.
+
+Elle reste jusqu'à ce qu'on la rende : en choisissant _Programme du
+régulateur_, _Chauffage_ ou _Auto_ (cela relance le chauffage, donc il faut
+« Autoriser les commandes »), ou avec le bouton **Rendre la main à la pompe
+à chaleur** (même condition). Un mode plus récent ne la remplace qu'une fois
+son écriture partie ; une commande demandée avant l'arrêt et pas encore
+envoyée est annulée.
+
+On ne sait pas si CTC garde sa protection contre le gel en mode de zone
+arrêt : vérifiez-le sur votre installation avant de vous y fier en hiver.
+
+### Les autres commandes
+
+Elles demandent **Autoriser les commandes**. Avant chaque écriture, Gladys
+relit la version du logiciel de l'écran dans la même session Modbus et
+refuse si elle manque ou diffère de celle lue auparavant (un autre
+régulateur à cette adresse). L'écriture doit partir dans les 3,5 s qui
+suivent le clic, sinon rien n'est envoyé. Plusieurs commandes à la fois (une scène) sont écrites l'une après
+l'autre, dans l'ordre ; un clic plus récent sur la même fonctionnalité
+remplace un clic plus ancien pas encore envoyé. Une écriture acquittée par
+le régulateur est tenue ; une écriture sans réponse est signalée « envoyée,
+sans acquittement » et réécrite dans la minute ; une écriture refusée par le
+régulateur n'est pas tenue. Désactiver l'option rend tout ce qui était tenu.
+Aucune n'est réécrite après un redémarrage de l'intégration : le régulateur
+les oublie sous 5 minutes.
+
+Les registres de pilotage ne se relisent pas (le manuel : écriture seule) :
+l'acquittement du régulateur est la confirmation que Gladys peut donner. Les
+états (circuit de chauffage 1, pompe à chaleur) montrent l'effet.
+
+## Pas (encore) fait
+
+La consigne d'eau chaude (registre 1033 : le manuel ne donne pas d'échelle
+pour le bloc 1000, une erreur pourrait surchauffer l'eau), les circuits 2 à
+4, le rafraîchissement, les limites de la résistance et du compresseur, les
+entrées SmartGrid, les codes d'alarme (65xxx), l'interface web de l'écran.

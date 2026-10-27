@@ -1,76 +1,73 @@
 # CLAUDE.md
 
-Project rules for coding assistants (Claude Code reads this file) and for human
-contributors.
+Project rules for coding assistants (Claude Code reads this file) and for
+human contributors. Read **[TODO.md](./TODO.md) first**: status, decisions
+already taken and the next milestones.
 
 ## What this is
 
-A Gladys Assistant **external integration**: a Node.js service (Node 22+, ESM,
-no build step) that runs in its own sandboxed Docker container and talks to
-Gladys through
-[`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
-its only runtime dependency. It started from the official JavaScript template.
+A Gladys Assistant **external integration** of type `device`: a Node.js
+service (Node 22+, ESM, no build step) in its own sandboxed Docker container,
+talking to Gladys through `@gladysassistant/integration-sdk` (v0.16), its only
+runtime dependency (Modbus TCP goes through our own client on `node:net`).
+It reads a CTC heat pump through the Modbus TCP (BMS) interface of its
+display and shows it as one Gladys device; three commands write CTC's
+volatile 1000 block. Never tested with a real CTC, not affiliated with CTC.
 
 ## Commands
 
 ```bash
 npm install
 npm test                                  # node --test, the built-in runner
-node --test test/devices.test.js          # one file
-node --test --test-name-pattern "plug"    # tests whose name matches
 npm run lint                              # ESLint
 npm run format:check                      # Prettier, as the CI runs it
-npm run format                            # Prettier, fix in place
-npx github:GladysAssistant/integration-store .   # store admission checks
+npm run audit                             # npm audit --omit=dev
+npm run cover                             # cover.png (800x534), plain Node
 ```
-
-The CI (`.github/workflows/ci.yml`) runs `format:check`, `lint` and `test` on
-Node 22 and 24, and builds the Docker image: run the three commands before
-pushing.
 
 ## Architecture
 
 ```
-index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
-src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
-gladys-assistant-integration.json manifest: name, config_schema, actions, image...
-docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
-test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
-.github/scripts/release.mjs       release helpers (manifest bump, changelog), tested in test/
+index.js                  SDK bootstrap; app.resume() before connect (heating off from /data)
+src/handlers.js           every SDK handler -> the app (shared with the tests)
+src/app.js                CtcApp: rounds, device, states, badge, status, buttons,
+                          commands, holds and keepalive, the heating off
+src/ctc.js                register map, blocks, decoding, writable registers (BMS manual)
+src/modbus/client.js      Modbus TCP client (functions 3, 16), the Gate and its levels
+src/devices.js            -> the Gladys device and its states (pure)
+src/publisher.js          states within 300/min
+src/store.js              /data: the heating off and its address only
+src/config.js             config_schema normalized
+src/constants.js          feature roles, limits, timings
+src/i18n.js               runtime texts (en/fr)
+test/fixtures/fakeCtc.js  the fake controller behind the socket factory
+test/kit/                 copied from gladys-testkit (clocks, loopback TCP server)
 ```
 
 ## Rules
 
-- **External ids are forever.** Build them with
-  `gladys.externalIds(type, platformId)`, `platformId` being the unique id the
-  platform gives the device (serial, cloud id, MAC), never a label. Gladys keys
-  devices, their history, scenes and dashboards on them: changing one creates a
-  new device and orphans the old one. The same goes for every key users store:
-  manifest `config_schema`, `actions`, widget and scene keys, feature keys.
-- **The container rootfs is read-only.** Write only under `/data`, the one
-  writable volume. Never log tokens, passwords or API keys.
-- **Versions belong to the Release workflow** (Actions → Release). Never edit
-  `version` in `package.json` or in the manifest, nor the `docker_image` tag,
-  by hand — except on the README's hand-pushed tag path, which bumps all three
-  together before tagging. `test/manifest.test.js` checks they agree.
-- **Changelog.** Every user-visible change adds a line under `## [Unreleased]`
-  in `CHANGELOG.md` (`### Added`, `Changed`, `Fixed`, `Removed`, `Security`).
-  Never write a version heading: the Release workflow moves the section, and it
-  becomes the notes of the GitHub Release.
-- **Manifest.** Texts are multi-language objects `{ "en": ..., "fr": ... }`:
-  `label`, `description` and `placeholder` alike, never a plain string. The
-  catalog `description` holds 10 to 100 characters per language. A field the
-  older cores do not know needs a higher `gladys_version` minimum
-  (`categories`: 4.86.0; `widgets`, `scene_triggers`, `scene_actions`,
-  `type: "provider"`: 5.1.0). `test/manifest.test.js` ties the manifest to the
-  code (defaults, action, scene and widget handlers): change both sides
-  together.
-- **User-facing text** is bilingual (English and French): action messages,
-  manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
-- **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
-  in English. Tests never touch the network.
+- **External ids are forever**: device `ext:ctc:heat-pump:ctc`, features
+  named by the roles of `src/constants.js` FEATURES. A republished device
+  never loses a feature.
+- Manifest keys (`address`, `allow_commands`, `poll_interval`, `language`,
+  the actions `test_connection`, `release_overrides`) are frozen.
+- **Writes**: only `WRITABLE` of `src/ctc.js` (1007, 1010, 1015), refused
+  in the client before anything else. Never the 615xx stored settings.
+- **Modbus**: one client, one connection, one request at a time; every
+  answer matched to its request; silence keeps the line (late answers
+  dropped by transaction id); 60 ms between transactions, 3 s after a
+  connection, 10 s after a close.
+- **Heating off** (1015 = 0): never refused for the option, the identity,
+  a read in flight (cut after 1 s of silence), a busy line or /data; kept
+  in /data with its address, written at start before getConfig, every
+  minute, every 15 s until acknowledged; given back only with the option.
+- **Other commands**: `allow_commands`; identity (display software version)
+  read again in the same session; sent within 3.5 s or not sent; cancelled
+  by a heating off asked meanwhile; never replayed after a restart.
+- **Never** a switch or a writable binary. No hot water temperature written.
+- Clocks: `monotonic` for every deadline and hold; `now` only for /data.
+- Units only from the core's `DEVICE_FEATURE_UNITS_BY_CATEGORY`.
+- Files are UTF-8 without BOM (`test/encoding.test.js`).
+- Code, comments, README in English; `docs/en.md` and `docs/fr.md` in sync.
+- Every user-visible change adds a line under `## [Unreleased]` in
+  `CHANGELOG.md`; versions belong to the Release workflow.
